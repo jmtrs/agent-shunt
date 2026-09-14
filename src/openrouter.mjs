@@ -34,7 +34,7 @@ export async function callOpenRouter({ apiKey, baseUrl, model, question, documen
     const requestBody = JSON.stringify({
       model,
       temperature: 0,
-      max_completion_tokens: maxOutputTokens,
+      max_tokens: maxOutputTokens,
       provider: {
         zdr: true,
         data_collection: 'deny',

@@ -24,7 +24,7 @@ test('enforces private routing, structured output, and output limits', async () 
   assert.equal(request.body.provider.zdr, true);
   assert.equal(request.body.provider.data_collection, 'deny');
   assert.equal(request.body.provider.require_parameters, true);
-  assert.equal(request.body.max_completion_tokens, 123);
+  assert.equal(request.body.max_tokens, 123);
   assert.equal(request.options.headers.authorization, 'Bearer secret');
 });
 

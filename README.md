@@ -37,7 +37,7 @@ Optional `~/.config/agent-shunt/config.json`:
 
 ```json
 {
-  "model": "qwen/qwen3.7-flash",
+  "model": "deepseek/deepseek-v4-flash",
   "timeoutMs": 60000,
   "maxOutputTokens": 2000,
   "maxResponseBytes": 1000000,

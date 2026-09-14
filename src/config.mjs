@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const DEFAULTS = Object.freeze({
-  model: 'qwen/qwen3.7-flash',
+  model: 'deepseek/deepseek-v4-flash',
   baseUrl: 'https://openrouter.ai/api/v1',
   timeoutMs: 60_000,
   maxOutputTokens: 2_000,
