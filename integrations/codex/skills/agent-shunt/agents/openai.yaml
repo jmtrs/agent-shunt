@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Shunt"
+  short_description: "Retrieve large code context at low cost"
+  default_prompt: "Use $agent-shunt to locate and analyze the relevant code efficiently."
