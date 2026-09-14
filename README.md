@@ -7,6 +7,8 @@ Stop dumping whole files into your agent's context.
 
 Coding agents burn their context window reading files wholesale and exploring blindly. agent-shunt gives them just the relevant pieces — found locally, for free — and can optionally get a model to synthesize an answer where every claim is checked against the source that was actually sent.
 
+Inspired by [Spotify's Portal "shunt" plugin](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90), which showed how much token spend is just bulk reads — with two twists: retrieval here is local and free, and the worker's file/line references are validated locally instead of trusted.
+
 ```bash
 agent-shunt retrieve --question "Where is authentication enforced?" --dir .
 ```
