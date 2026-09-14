@@ -44,6 +44,32 @@ When every model in the chain fails, the command returns `host fallback required
 
 Local endpoints run keyless automatically. Set `responseFormat` to `"json_object"` for providers without JSON-schema structured-output support.
 
+### Any other provider
+
+The table above is examples, not an allowlist — there is no provider list in the code. Any endpoint that (1) serves `POST {baseUrl}/chat/completions`, (2) accepts `Authorization: Bearer <key>`, and (3) returns an OpenAI-shaped response works: Together, Fireworks, Mistral, DeepSeek direct, xAI, Cerebras, SambaNova, self-hosted vLLM, or a LiteLLM proxy in front of a non-OpenAI API.
+
+Ad-hoc, no config file needed:
+
+```bash
+export AGENT_SHUNT_BASE_URL="https://api.together.xyz/v1"
+export AGENT_SHUNT_API_KEY="your-together-key"
+agent-shunt retrieve --analyze --question "..." --dir .
+```
+
+Or persistent, with the provider's own variable name:
+
+```json
+{
+  "baseUrl": "https://api.together.xyz/v1",
+  "apiKeyEnv": "TOGETHER_API_KEY",
+  "model": "deepseek-ai/DeepSeek-V3.1",
+  "fallbackModels": [],
+  "responseFormat": "json_object"
+}
+```
+
+Model IDs follow the provider's own naming, not OpenRouter slugs. Set `fallbackModels` to `[]` when the provider offers a single suitable model.
+
 ## Install
 
 Requirements:
