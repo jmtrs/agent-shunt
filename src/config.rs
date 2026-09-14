@@ -10,13 +10,36 @@ pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
 pub const DEFAULT_FALLBACK_MODEL: &str = "z-ai/glm-4.7-flash";
 pub const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub model: String,
     pub fallback_models: Vec<String>,
     pub codex_homes: Vec<PathBuf>,
+    pub base_url: String,
+    pub response_format: String,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+    pub local_provider: bool,
     pub limits: Limits,
     pub config_file: PathBuf,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The API key is never rendered, even in logs and test failures.
+        f.debug_struct("Config")
+            .field("model", &self.model)
+            .field("fallback_models", &self.fallback_models)
+            .field("codex_homes", &self.codex_homes)
+            .field("base_url", &self.base_url)
+            .field("response_format", &self.response_format)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("api_key_env", &self.api_key_env)
+            .field("local_provider", &self.local_provider)
+            .field("limits", &self.limits)
+            .field("config_file", &self.config_file)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -26,6 +49,9 @@ struct StoredConfig {
     fallback_models: Option<Vec<String>>,
     codex_homes: Option<Vec<String>>,
     base_url: Option<String>,
+    response_format: Option<String>,
+    api_key: Option<String>,
+    api_key_env: Option<String>,
     timeout_ms: Option<u64>,
     max_output_tokens: Option<u64>,
     max_response_bytes: Option<usize>,
@@ -47,9 +73,34 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
     } else {
         StoredConfig::default()
     };
-    if let Some(base_url) = stored.base_url.as_deref() {
-        validate_base_url(base_url)?;
+    let base_url = env::var("AGENT_SHUNT_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or(stored.base_url)
+        .unwrap_or_else(|| BASE_URL.to_owned());
+    let base_url = base_url.trim().to_owned();
+    if base_url.is_empty() {
+        bail!("baseUrl must not be empty");
     }
+    let parsed_url = validate_base_url(&base_url)?;
+    let local_provider = is_local_host(&parsed_url);
+    let response_format = stored
+        .response_format
+        .as_deref()
+        .unwrap_or("json_schema")
+        .trim()
+        .to_owned();
+    if !matches!(response_format.as_str(), "json_schema" | "json_object") {
+        bail!("responseFormat must be \"json_schema\" or \"json_object\"");
+    }
+    let api_key = stored
+        .api_key
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty());
+    let api_key_env = stored
+        .api_key_env
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty());
     let defaults = Limits::default();
     let limits = Limits {
         timeout_ms: bounded(stored.timeout_ms, defaults.timeout_ms, 300_000, "timeoutMs")?,
@@ -124,6 +175,11 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
         model,
         fallback_models,
         codex_homes,
+        base_url,
+        response_format,
+        api_key,
+        api_key_env,
+        local_provider,
         limits,
         config_file,
     })
@@ -144,21 +200,46 @@ fn expand_home(raw: &str) -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(rest))
 }
 
-fn validate_base_url(value: &str) -> Result<()> {
-    let url =
-        Url::parse(value).map_err(|_| anyhow::anyhow!("baseUrl must be exactly {BASE_URL}"))?;
-    let normalized_path = url.path().trim_end_matches('/');
-    if url.scheme() != "https"
-        || url.host_str() != Some("openrouter.ai")
-        || normalized_path != "/api/v1"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        bail!("baseUrl must be exactly {BASE_URL}");
+/// Accepts any absolute http(s) worker origin. Plain `http` is allowed only
+/// for loopback and private-network hosts; everything else must use `https`
+/// so credentials are never sent in cleartext to a remote provider.
+fn validate_base_url(value: &str) -> Result<Url> {
+    let url = Url::parse(value)
+        .map_err(|_| anyhow::anyhow!("baseUrl must be an absolute http(s) URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("baseUrl must use http or https");
     }
-    Ok(())
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("baseUrl must not embed credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("baseUrl must not include a query or fragment");
+    }
+    if url.scheme() == "http" && !is_local_host(&url) {
+        bail!(
+            "plain http is only allowed for loopback or private-network hosts; use https for {}",
+            url.host_str().unwrap_or("this host")
+        );
+    }
+    Ok(url)
+}
+
+fn is_local_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => {
+            address.is_loopback() || address.is_private() || address.is_link_local()
+        }
+        Some(url::Host::Ipv6(address)) => {
+            // IPv4-mapped addresses (`::ffff:127.0.0.1`) must inherit the
+            // IPv4 classification instead of counting as global IPv6.
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return mapped.is_loopback() || mapped.is_private() || mapped.is_link_local();
+            }
+            address.is_loopback() || address.is_unique_local()
+        }
+        None => false,
+    }
 }
 
 fn bounded<T>(value: Option<T>, fallback: T, hard_max: T, name: &str) -> Result<T>
@@ -182,10 +263,23 @@ mod tests {
     use super::{bounded, expand_home, validate_base_url};
 
     #[test]
-    fn only_accepts_fixed_openrouter_origin() {
+    fn accepts_any_https_origin_but_guards_plain_http() {
         assert!(validate_base_url("https://openrouter.ai/api/v1/").is_ok());
-        assert!(validate_base_url("https://attacker.example/api/v1").is_err());
-        assert!(validate_base_url("https://openrouter.ai/api/v1?x=1").is_err());
+        assert!(validate_base_url("https://api.groq.com/openai/v1").is_ok());
+        assert!(validate_base_url("http://localhost:11434/v1").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:1234/v1").is_ok());
+        assert!(validate_base_url("http://192.168.1.10:8080/v1").is_ok());
+        assert!(validate_base_url("http://[::1]:1234/v1").is_ok());
+        assert!(validate_base_url("http://[::ffff:127.0.0.1]/v1").is_ok());
+        assert!(validate_base_url("http://[::ffff:192.168.1.10]/v1").is_ok());
+        assert!(validate_base_url("http://[fd00::1]/v1").is_ok());
+        assert!(validate_base_url("http://[::ffff:8.8.8.8]/v1").is_err());
+        assert!(validate_base_url("http://[2001:db8::1]/v1").is_err());
+        assert!(validate_base_url("http://example.com/v1").is_err());
+        assert!(validate_base_url("ftp://example.com/v1").is_err());
+        assert!(validate_base_url("https://user:pass@example.com/v1").is_err());
+        assert!(validate_base_url("https://example.com/v1?x=1").is_err());
+        assert!(validate_base_url("not a url").is_err());
     }
 
     #[test]

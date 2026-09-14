@@ -12,12 +12,15 @@ fn representative_repository_queries_recover_expected_evidence() {
     let cases: &[(&str, &[&str])] = &[
         ("credential precedence", &["src/adapters/credentials.rs"]),
         (
-            "Zero Data Retention OpenRouter provider policy",
-            &["src/adapters/openrouter.rs"],
+            "zdr data_collection deny require_parameters provider policy",
+            &["src/adapters/openai_compatible.rs"],
         ),
         (
             "validate hallucinated source line ranges",
-            &["src/application/scan.rs", "src/adapters/openrouter.rs"],
+            &[
+                "src/application/scan.rs",
+                "src/adapters/openai_compatible.rs",
+            ],
         ),
         (
             "metrics exclude source questions and paths",

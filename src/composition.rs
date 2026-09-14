@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use crate::{
     adapters::{
         codex_install::CodexInstaller, credentials::EnvironmentCredentials,
-        filesystem::SecureFilesystem, metrics::JsonlMetrics, openrouter::OpenRouterWorker,
-        ripgrep::RipgrepSearch,
+        filesystem::SecureFilesystem, metrics::JsonlMetrics,
+        openai_compatible::OpenAiCompatibleWorker, ripgrep::RipgrepSearch,
     },
     application::{
         ports::{CodeSearch, CredentialResolver, HostInstaller, MetricsSink},
@@ -21,8 +21,6 @@ use crate::{
 pub struct Application {
     filesystem: SecureFilesystem,
     search: RipgrepSearch,
-    worker: OpenRouterWorker,
-    credentials: EnvironmentCredentials,
     metrics: JsonlMetrics,
     installer: CodexInstaller,
 }
@@ -41,8 +39,6 @@ impl Default for Application {
         Self {
             filesystem: SecureFilesystem,
             search: RipgrepSearch,
-            worker: OpenRouterWorker,
-            credentials: EnvironmentCredentials,
             metrics: JsonlMetrics::new(JsonlMetrics::default_path()),
             installer: CodexInstaller::new(
                 std::env::current_exe()
@@ -53,7 +49,19 @@ impl Default for Application {
 }
 
 impl Application {
-    pub fn scan(&self, input: ScanInput, dry_run: bool) -> Result<Value> {
+    fn worker_for(&self, config: &Config) -> OpenAiCompatibleWorker {
+        OpenAiCompatibleWorker::new(&config.base_url, &config.response_format)
+    }
+
+    fn credentials_for(&self, config: &Config) -> EnvironmentCredentials {
+        EnvironmentCredentials::new(
+            config.api_key.clone(),
+            config.api_key_env.clone(),
+            config.local_provider,
+        )
+    }
+
+    pub fn scan(&self, config: &Config, input: ScanInput, dry_run: bool) -> Result<Value> {
         let started = Instant::now();
         let result = if dry_run {
             scan::dry_run(&self.filesystem, &input).and_then(|(result, bytes)| {
@@ -68,7 +76,9 @@ impl Application {
                 })
             })
         } else {
-            scan::execute(&self.filesystem, &self.credentials, &self.worker, &input).and_then(
+            let credentials = self.credentials_for(config);
+            let worker = self.worker_for(config);
+            scan::execute(&self.filesystem, &credentials, &worker, &input).and_then(
                 |(result, bytes, fallback)| {
                     let files = result.files_read.len();
                     let usage = result.usage.clone();
@@ -90,11 +100,13 @@ impl Application {
     pub fn retrieve(&self, input: RetrieveInput, analyze: bool, config: &Config) -> Result<Value> {
         let started = Instant::now();
         let result = if analyze {
+            let credentials = self.credentials_for(config);
+            let worker = self.worker_for(config);
             retrieve::execute_analyzed(
                 &self.search,
                 &self.filesystem,
-                &self.credentials,
-                &self.worker,
+                &credentials,
+                &worker,
                 &input,
                 &config.model,
                 &config.fallback_models,
@@ -137,25 +149,34 @@ impl Application {
     }
 
     pub fn check(&self, config: &Config) -> Result<Value> {
-        let credential = self.credentials.resolve()?;
+        let credential = self.credentials_for(config).resolve()?;
         Ok(json!({
             "configured": true,
             "remoteValidation": "not-performed",
+            "baseUrl": config.base_url,
+            "responseFormat": config.response_format,
             "model": config.model,
             "credentialSource": credential.source
         }))
     }
 
     pub fn doctor(&self, config: &Config) -> Value {
-        let credential = self.credentials.resolve();
+        let credential = self.credentials_for(config).resolve();
+        let credential_status = match &credential {
+            Ok(credential) if credential.api_key.is_empty() => "not-required (local)",
+            Ok(_) => "found",
+            Err(_) => "missing",
+        };
         json!({
             "version": 1,
             "healthy": credential.is_ok() && self.search.available(),
             "rustImplementation": true,
+            "baseUrl": config.base_url,
+            "responseFormat": config.response_format,
             "model": config.model,
             "fallbackModels": config.fallback_models,
             "configFile": config.config_file,
-            "credential": if credential.is_ok() { "found" } else { "missing" },
+            "credential": credential_status,
             "ripgrep": if self.search.available() { "available" } else { "missing" },
             "remoteValidation": "not-performed"
         })

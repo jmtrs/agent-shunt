@@ -118,6 +118,7 @@ fn run() -> Result<()> {
         Some(Command::Scan(args)) => {
             let config = config::load(args.model.as_deref())?;
             app.scan(
+                &config,
                 scan_input(args.question, args.path, args.cwd, &config),
                 args.dry_run,
             )?

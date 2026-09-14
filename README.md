@@ -5,7 +5,7 @@
 
 Provider-neutral, read-only context worker for coding agents, implemented in Rust.
 
-Coding agents burn context on whole-file reads and broad exploration. `agent-shunt` gives them bounded, validated context instead: deterministic local retrieval for free, and an optional low-cost model pass for synthesis — with every model claim checked against the source that was actually sent.
+Coding agents burn context on whole-file reads and broad exploration. `agent-shunt` gives them bounded, validated context instead: deterministic local retrieval for free, and an optional model pass for synthesis — with every model claim checked against the source that was actually sent.
 
 ```
 agent-shunt retrieve --question "Where is authentication enforced?" --dir .
@@ -16,7 +16,7 @@ agent-shunt retrieve --question "Where is authentication enforced?" --dir .
 Two independent paths:
 
 - **`retrieve`** — finds and ranks bounded source chunks locally with `rg`. No model request, no network, no credentials. Git ignore rules are respected and common generated directories are excluded. Search is streamed with a hard hit cap, a 10-second process deadline, and a 5 MiB per-candidate search cap. The evidence token budget is strict: a chunk that does not fit is not included.
-- **`scan` and `retrieve --analyze`** — send explicit or retrieved context to a low-cost [OpenRouter](https://openrouter.ai) model and validate every returned path and line range locally. A finding is accepted only when its complete line range was actually included in the evidence sent to the model.
+- **`scan` and `retrieve --analyze`** — send explicit or retrieved context to any OpenAI-compatible chat-completions endpoint and validate every returned path and line range locally. A finding is accepted only when its complete line range was actually included in the evidence sent to the model.
 
 When every model in the chain fails, the command returns `host fallback required` instead of guessing, so the calling agent resumes its normal targeted reads.
 
@@ -24,11 +24,25 @@ When every model in the chain fails, the command returns `host fallback required
 
 - **Read-only.** The tool never writes to your repository.
 - **Sandboxed file access.** Files are opened component-by-component with `openat` beneath an already-open root directory descriptor. Symlinked path components are rejected, inputs must be strict UTF-8 regular files, and file metadata must remain stable while reading.
-- **Fixed API origin.** The OpenRouter origin is hard-coded to `https://openrouter.ai/api/v1`. Custom origins are rejected, so configuration cannot redirect your Bearer token.
-- **Zero Data Retention enforced.** Every model request requires structured-output support, denies data-collection providers, and enforces Zero Data Retention routing. Models ending in `:free` and the `openrouter/free` router are blocked.
+- **Transport guardrail.** The worker endpoint is yours to choose, but plain `http` is only accepted for loopback and private-network hosts — credentials are never sent in cleartext to a remote provider. URLs embedding credentials, queries, or fragments are rejected.
+- **Zero Data Retention on OpenRouter.** When the endpoint host is `openrouter.ai`, every model request requires structured-output support, denies data-collection providers, enforces Zero Data Retention routing, and blocks `:free` routes. Other providers receive no proprietary fields; their data policy is between you and them.
 - **Bounded everything.** Request, response, question, output-token, file-count, per-file and total-byte limits are all enforced before anything is sent or accepted.
 - **Credentials stay local.** The API key is read at runtime from the environment or a config file and is never printed, copied, or written to metrics.
 - **Aggregate-only metrics.** Local telemetry records operation status, model, timing, byte/file counts, token usage, cost, and fallback state. Questions, paths, source content, answers, and credentials are never stored.
+
+## Providers
+
+`agent-shunt` speaks the OpenAI-compatible chat-completions protocol and ships no provider of its own — point it at whichever endpoint you already use:
+
+| Provider | `baseUrl` | Key |
+| --- | --- | --- |
+| [OpenRouter](https://openrouter.ai) (default) | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| OpenAI | `https://api.openai.com/v1` | `OPENAI_API_KEY` via `apiKeyEnv` |
+| Groq | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` via `apiKeyEnv` |
+| Ollama (local) | `http://localhost:11434/v1` | none needed |
+| LM Studio (local) | `http://localhost:1234/v1` | none needed |
+
+Local endpoints run keyless automatically. Set `responseFormat` to `"json_object"` for providers without JSON-schema structured-output support.
 
 ## Install
 
@@ -36,7 +50,7 @@ Requirements:
 
 - Rust 1.85+ (edition 2024)
 - [`rg`](https://github.com/BurntSushi/ripgrep) (Ripgrep) on your `PATH` — required for `retrieve`
-- An OpenRouter API key — only for the model-backed paths (`scan`, `retrieve --analyze`)
+- Access to any OpenAI-compatible endpoint — only for the model-backed paths (`scan`, `retrieve --analyze`)
 
 ```bash
 git clone https://github.com/jmtrs/agent-shunt.git
@@ -44,11 +58,11 @@ cd agent-shunt
 cargo install --path .
 ```
 
-Provide the key via `OPENROUTER_API_KEY` in the environment, or store it once:
+Provide the key via `AGENT_SHUNT_API_KEY` (or `OPENROUTER_API_KEY`) in the environment, or store it once:
 
 ```bash
 mkdir -p ~/.config/agent-shunt
-echo 'OPENROUTER_API_KEY=sk-or-...' > ~/.config/agent-shunt/.env
+echo 'AGENT_SHUNT_API_KEY=sk-...' > ~/.config/agent-shunt/.env
 chmod 600 ~/.config/agent-shunt/.env
 ```
 
@@ -116,8 +130,12 @@ Optional `~/.config/agent-shunt/config.json`:
 
 ```json
 {
+  "baseUrl": "https://openrouter.ai/api/v1",
   "model": "deepseek/deepseek-v4-flash",
   "fallbackModels": ["z-ai/glm-4.7-flash"],
+  "apiKey": "sk-...",
+  "apiKeyEnv": "GROQ_API_KEY",
+  "responseFormat": "json_schema",
   "codexHomes": ["~/.codex", "~/.codex-work"],
   "timeoutMs": 60000,
   "maxOutputTokens": 2000,
@@ -130,11 +148,17 @@ Optional `~/.config/agent-shunt/config.json`:
 }
 ```
 
-CLI model overrides take precedence over stored configuration. `codexHomes` accepts `~`-relative paths and defaults to `["~/.codex"]` when unset.
+- `baseUrl` — any absolute http(s) OpenAI-compatible origin (env override: `AGENT_SHUNT_BASE_URL`). Plain `http` is limited to loopback and private-network hosts.
+- `apiKey` — key stored directly in the config file (mind its permissions).
+- `apiKeyEnv` — name of an environment variable holding the key, for provider-specific names like `GROQ_API_KEY`. Resolution order: `apiKey` config value, `AGENT_SHUNT_API_KEY`, `OPENROUTER_API_KEY`, the `apiKeyEnv` variable, then the env files.
+- `responseFormat` — `"json_schema"` (default) or `"json_object"` for providers without schema support.
+- `codexHomes` — accepts `~`-relative paths, defaults to `["~/.codex"]`.
+
+CLI model overrides take precedence over stored configuration.
 
 ### Model chain and fallback
 
-The default chain is DeepSeek V4 Flash → GLM 4.7 Flash. Transport, HTTP, empty-output, invalid-JSON, schema, and source-reference failures advance through the chain; one overall timeout covers the complete chain. If every model fails, the command returns `host fallback required`.
+The default chain is DeepSeek V4 Flash → GLM 4.7 Flash on OpenRouter; set `model` and `fallbackModels` to your provider's IDs when pointing elsewhere. Transport, HTTP, empty-output, invalid-JSON, schema, and source-reference failures advance through the chain; one overall timeout covers the complete chain. If every model fails, the command returns `host fallback required`.
 
 ## Architecture
 
@@ -143,14 +167,14 @@ Hexagonal (ports and adapters), dependency pointing inward:
 ```
 domain
   ← application use cases and owned ports
-      ← outbound adapters (filesystem, rg, OpenRouter, metrics, credentials)
+      ← outbound adapters (filesystem, rg, OpenAI-compatible worker, metrics, credentials)
           ← composition root
               ← CLI
 ```
 
 - `src/domain/` — values and invariants, no infrastructure knowledge.
 - `src/application/` — use cases and consumer-owned port traits.
-- `src/adapters/` — filesystem, ripgrep, OpenRouter, credential, and metrics implementations, plus the Codex installer and hook.
+- `src/adapters/` — filesystem, ripgrep, OpenAI-compatible worker, credential, and metrics implementations, plus the Codex installer and hook.
 - `src/composition.rs` — dependency wiring and operation-level metrics.
 - `src/main.rs` — thin CLI adapter.
 

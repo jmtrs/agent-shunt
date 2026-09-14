@@ -25,10 +25,20 @@ pub trait CredentialResolver {
     fn resolve(&self) -> Result<ResolvedCredential>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedCredential {
     pub api_key: String,
     pub source: String,
+}
+
+impl std::fmt::Debug for ResolvedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key itself is never rendered; only where it came from.
+        f.debug_struct("ResolvedCredential")
+            .field("api_key", &"***")
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 pub trait MetricsSink {
