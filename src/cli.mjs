@@ -41,7 +41,7 @@ export async function runCli(argv) {
     const { loadConfig, resolveApiKey } = await import('./config.mjs');
     const config = await loadConfig(options.configOverrides);
     const credential = await resolveApiKey();
-    process.stdout.write(`${JSON.stringify({ ok: true, model: config.model, credentialSource: credential.source }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ configured: true, remoteValidation: 'not-performed', model: config.model, credentialSource: credential.source }, null, 2)}\n`);
     return;
   }
   if (command !== 'scan') throw new Error(`unknown command: ${command}`);

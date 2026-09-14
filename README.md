@@ -23,6 +23,8 @@ agent-shunt scan \
   --path src/routes.js
 ```
 
+`check` confirms local configuration and credential discovery only. A real `scan` is required to validate the credential with OpenRouter.
+
 Validate inputs without sending anything:
 
 ```bash
