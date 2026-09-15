@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     application::ports::{
-        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DocumentLoader,
+        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseRanker, DocumentLoader,
         StructureResolver,
     },
     domain::{Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
@@ -100,6 +100,17 @@ const CLIFF_GAP_PERCENT: usize = 30;
 /// (which is almost always within the top few) while still trimming the shoulder.
 const MIN_CLIFF_FILES: usize = 3;
 
+/// Reciprocal Rank Fusion smoothing constant. The standard value: it damps the
+/// weight of any single list's top ranks so neither the lexical nor the dense
+/// ranking dominates, and fusing on ranks sidesteps the incompatible score
+/// scales of BM25-style weights and cosine similarity.
+const RRF_K: f64 = 60.0;
+
+/// Most candidate chunks embedded in one semantic pass. Bounds the embedding
+/// cost and request size; the pool is the top of the lexical ranking, which is
+/// where a semantically relevant chunk realistically sits.
+const MAX_SEMANTIC_CANDIDATES: usize = 96;
+
 /// Executes bounded retrieval with the dependency-free heuristic block
 /// resolver. The default entry point; [`execute_with_resolver`] injects an
 /// AST-backed resolver where one is available.
@@ -114,6 +125,7 @@ pub fn execute(
         change_source,
         loader,
         &super::resolver::HeuristicResolver,
+        None,
         input,
     )
 }
@@ -122,11 +134,13 @@ pub fn execute(
 /// retrieved chunk that does not fit the budget is skipped entirely, never
 /// truncated, so selected evidence is always complete source context. The
 /// `resolver` snaps each hit to its enclosing block.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_resolver(
     search: &dyn CodeSearch,
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
     resolver: &dyn StructureResolver,
+    dense: Option<&dyn DenseRanker>,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
     super::scan::validate_question(&input.question, &input.limits)?;
@@ -317,6 +331,13 @@ pub fn execute_with_resolver(
     });
 
     let available_count = candidates.len();
+    // Optional semantic pass: fuse the lexical ranking with a dense
+    // (embedding) ranking so a chunk that answers the question by meaning —
+    // not by sharing its exact terms — can rise into the budget. Only the
+    // opt-in `--semantic` path supplies a ranker; the default stays local.
+    if let Some(dense) = dense {
+        rescore_semantic(dense, &input.question, &mut candidates)?;
+    }
     // Relevance floor: drop the ranked tail whose score is a small fraction of
     // the top hit before anything is selected, so weakly-related files never
     // consume the token budget. `available_count` is captured above, so any
@@ -415,13 +436,15 @@ pub fn execute_analyzed(
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
     resolver: &dyn StructureResolver,
+    dense: Option<&dyn DenseRanker>,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
     input: &RetrieveInput,
     model: &str,
     fallback_models: &[String],
 ) -> Result<(ScanResult, usize, bool)> {
-    let (_, documents) = execute_with_resolver(search, change_source, loader, resolver, input)?;
+    let (_, documents) =
+        execute_with_resolver(search, change_source, loader, resolver, dense, input)?;
     if documents.is_empty() {
         bail!("automatic retrieval found no relevant source chunks within the token budget");
     }
@@ -468,6 +491,80 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
             })
         })
         .collect()
+}
+
+/// Re-scores candidates by fusing their existing lexical ranking with a dense
+/// (embedding) ranking of the same chunks. The fused rank becomes each
+/// candidate's new score, so the downstream relevance floor, MMR ordering, and
+/// budget packing all operate on the hybrid ranking without further change.
+fn rescore_semantic(
+    dense: &dyn DenseRanker,
+    question: &str,
+    candidates: &mut Vec<RetrievedChunk>,
+) -> Result<()> {
+    if candidates.len() < 2 {
+        return Ok(());
+    }
+    // The pool is already sorted by lexical score; cap it so the embedding
+    // request stays bounded and keeps the strongest candidates.
+    candidates.truncate(MAX_SEMANTIC_CANDIDATES);
+    let texts = candidates
+        .iter()
+        .map(|candidate| candidate.content.clone())
+        .collect::<Vec<_>>();
+    let similarities = dense.similarities(question, &texts)?;
+    if similarities.len() != candidates.len() {
+        bail!(
+            "dense ranker returned {} scores for {} candidates",
+            similarities.len(),
+            candidates.len()
+        );
+    }
+    // Lexical ranking is the current order; the dense ranking sorts by cosine.
+    let lexical = (0..candidates.len()).collect::<Vec<_>>();
+    let mut dense_rank = (0..candidates.len()).collect::<Vec<_>>();
+    dense_rank.sort_by(|&left, &right| {
+        similarities[right]
+            .partial_cmp(&similarities[left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.cmp(&right))
+    });
+    let fused = reciprocal_rank_fusion(&[lexical, dense_rank], RRF_K);
+    let count = candidates.len();
+    for (position, (index, _)) in fused.iter().enumerate() {
+        // Fused rank -> descending integer score the rest of the pipeline reads.
+        candidates[*index].score = count - position;
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+    Ok(())
+}
+
+/// Reciprocal Rank Fusion: combines several ranked lists (each a sequence of
+/// candidate indices, best first) into one, scoring every candidate by the sum
+/// of `1 / (k + rank)` across the lists it appears in. Returns `(index, score)`
+/// pairs sorted by fused score, ties broken by index for determinism.
+fn reciprocal_rank_fusion(lists: &[Vec<usize>], k: f64) -> Vec<(usize, f64)> {
+    let mut scores: BTreeMap<usize, f64> = BTreeMap::new();
+    for list in lists {
+        for (rank, &index) in list.iter().enumerate() {
+            *scores.entry(index).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+        }
+    }
+    let mut fused = scores.into_iter().collect::<Vec<_>>();
+    fused.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.0.cmp(&right.0))
+    });
+    fused
 }
 
 /// Tokens the caller actually pays for a chunk: its numbered content and path,
@@ -584,14 +681,55 @@ mod tests {
     use anyhow::Result;
 
     use crate::{
-        application::ports::{ChangeSource, CodeSearch, DocumentLoader},
-        domain::{Document, FileChange, Limits, LineRange, LoadedDocuments, SearchHit},
+        application::ports::{ChangeSource, CodeSearch, DenseRanker, DocumentLoader},
+        domain::{
+            Document, FileChange, Limits, LineRange, LoadedDocuments, RetrievedChunk, SearchHit,
+        },
     };
 
     use super::{
         ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput,
-        estimate_tokens, execute,
+        estimate_tokens, execute, reciprocal_rank_fusion, rescore_semantic,
     };
+
+    #[test]
+    fn reciprocal_rank_fusion_rewards_agreement_across_lists() {
+        // One list ranks A>B>C, the other C>A>B. A appears near the top of both,
+        // so it wins; C's single first place lifts it above B.
+        let fused = reciprocal_rank_fusion(&[vec![0, 1, 2], vec![2, 0, 1]], 60.0);
+        let order = fused.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(order, vec![0, 2, 1]);
+    }
+
+    struct MockDense(Vec<f32>);
+    impl DenseRanker for MockDense {
+        fn similarities(&self, _question: &str, candidates: &[String]) -> Result<Vec<f32>> {
+            assert_eq!(candidates.len(), self.0.len());
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn semantic_pass_lifts_a_lexically_weak_but_relevant_chunk() {
+        // Lexical order is a > b > c. The dense ranker judges c most similar, so
+        // fusion must promote c above b while a still leads.
+        let chunk = |path: &str, score: usize| RetrievedChunk {
+            path: path.to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score,
+            estimated_tokens: 10,
+            content: format!("{path} body"),
+        };
+        let mut candidates = vec![chunk("a", 100), chunk("b", 90), chunk("c", 80)];
+        let dense = MockDense(vec![0.0, 0.0, 1.0]);
+        rescore_semantic(&dense, "question", &mut candidates).unwrap();
+        let order = candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["a", "c", "b"]);
+    }
 
     #[test]
     fn estimate_tokens_counts_symbol_dense_code_above_a_flat_quarter() {

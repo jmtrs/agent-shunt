@@ -5,14 +5,20 @@ use serde_json::{Value, json};
 
 use crate::{
     adapters::{
-        claude_install::ClaudeInstaller, codex_install::CodexInstaller,
-        credentials::EnvironmentCredentials, filesystem::SecureFilesystem,
-        gemini_install::GeminiInstaller, git::GitChangeSource, metrics::JsonlMetrics,
-        openai_compatible::OpenAiCompatibleWorker, opencode_install::OpencodeInstaller,
-        repo_install::RepoInstaller, ripgrep::RipgrepSearch,
+        claude_install::ClaudeInstaller,
+        codex_install::CodexInstaller,
+        credentials::EnvironmentCredentials,
+        filesystem::SecureFilesystem,
+        gemini_install::GeminiInstaller,
+        git::GitChangeSource,
+        metrics::JsonlMetrics,
+        openai_compatible::{EmbeddingDenseRanker, OpenAiCompatibleWorker},
+        opencode_install::OpencodeInstaller,
+        repo_install::RepoInstaller,
+        ripgrep::RipgrepSearch,
     },
     application::{
-        ports::{CodeSearch, CredentialResolver, HostInstaller, MetricsSink},
+        ports::{CodeSearch, CredentialResolver, DenseRanker, HostInstaller, MetricsSink},
         retrieve::{self, RetrieveInput},
         scan::{self, ScanInput},
     },
@@ -142,8 +148,52 @@ impl Application {
         result.map(|result| result.value)
     }
 
-    pub fn retrieve(&self, input: RetrieveInput, analyze: bool, config: &Config) -> Result<Value> {
+    /// Builds the opt-in dense re-ranker for `--semantic`. Requires an
+    /// `embeddingModel`; the base URL defaults to the worker's, and the key
+    /// resolves like the worker's (optionally via `embeddingApiKeyEnv`). Returns
+    /// an error rather than silently degrading, since the flag was explicit.
+    fn dense_ranker_for(&self, config: &Config) -> Result<EmbeddingDenseRanker> {
+        let model = config.embedding_model.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--semantic requires an embeddingModel in config (~/.config/agent-shunt/config.json)"
+            )
+        })?;
+        let base_url = config
+            .embedding_base_url
+            .clone()
+            .unwrap_or_else(|| config.base_url.clone());
+        let local = crate::config::is_local_base_url(&base_url);
+        let credentials = EnvironmentCredentials::new(
+            config.api_key.clone(),
+            config
+                .embedding_api_key_env
+                .clone()
+                .or_else(|| config.api_key_env.clone()),
+            local,
+        );
+        let api_key = credentials.resolve()?.api_key;
+        Ok(EmbeddingDenseRanker::new(
+            &base_url,
+            &model,
+            &api_key,
+            config.limits.clone(),
+        ))
+    }
+
+    pub fn retrieve(
+        &self,
+        input: RetrieveInput,
+        analyze: bool,
+        semantic: bool,
+        config: &Config,
+    ) -> Result<Value> {
         let started = Instant::now();
+        let dense = if semantic {
+            Some(self.dense_ranker_for(config)?)
+        } else {
+            None
+        };
+        let dense = dense.as_ref().map(|ranker| ranker as &dyn DenseRanker);
         let result = if analyze {
             let credentials = self.credentials_for(config);
             let worker = self.worker_for(config);
@@ -152,6 +202,7 @@ impl Application {
                 &self.changes,
                 &self.filesystem,
                 &self.resolver,
+                dense,
                 &credentials,
                 &worker,
                 &input,
@@ -178,6 +229,7 @@ impl Application {
                 &self.changes,
                 &self.filesystem,
                 &self.resolver,
+                dense,
                 &input,
             )
             .and_then(|(retrieval_result, documents)| {

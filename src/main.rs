@@ -196,6 +196,12 @@ struct RetrieveArgs {
     diff: Option<String>,
     #[arg(long)]
     analyze: bool,
+    /// Opt-in hybrid retrieval: fuse the local lexical ranking with a dense
+    /// embedding ranking (Reciprocal Rank Fusion) so semantically relevant
+    /// chunks surface even when they share few exact terms. Requires an
+    /// `embeddingModel` in config and sends candidate chunks to that endpoint.
+    #[arg(long)]
+    semantic: bool,
 }
 
 fn main() {
@@ -251,7 +257,7 @@ fn run() -> Result<()> {
                     .or(config.min_score_percent)
                     .unwrap_or(MIN_SCORE_PERCENT),
             };
-            app.retrieve(input, args.analyze, &config)?
+            app.retrieve(input, args.analyze, args.semantic, &config)?
         }
         Some(Command::Check(args)) => {
             let config = config::load(args.model.as_deref())?;

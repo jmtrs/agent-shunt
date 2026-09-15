@@ -37,6 +37,12 @@ pub struct Config {
     pub mmr_lambda: Option<f64>,
     pub max_block_lines: Option<usize>,
     pub min_score_percent: Option<usize>,
+    /// Embeddings endpoint for the opt-in `--semantic` re-ranking pass. The
+    /// model is required to enable it; the base URL defaults to `base_url` and
+    /// the key resolves like the worker's, optionally via `embedding_api_key_env`.
+    pub embedding_model: Option<String>,
+    pub embedding_base_url: Option<String>,
+    pub embedding_api_key_env: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -59,6 +65,9 @@ impl std::fmt::Debug for Config {
             .field("mmr_lambda", &self.mmr_lambda)
             .field("max_block_lines", &self.max_block_lines)
             .field("min_score_percent", &self.min_score_percent)
+            .field("embedding_model", &self.embedding_model)
+            .field("embedding_base_url", &self.embedding_base_url)
+            .field("embedding_api_key_env", &self.embedding_api_key_env)
             .finish()
     }
 }
@@ -87,6 +96,9 @@ struct StoredConfig {
     mmr_lambda: Option<f64>,
     max_block_lines: Option<usize>,
     min_score_percent: Option<usize>,
+    embedding_model: Option<String>,
+    embedding_base_url: Option<String>,
+    embedding_api_key_env: Option<String>,
 }
 
 pub fn load(model_override: Option<&str>) -> Result<Config> {
@@ -242,6 +254,18 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
         mmr_lambda: stored.mmr_lambda,
         max_block_lines: stored.max_block_lines,
         min_score_percent: stored.min_score_percent,
+        embedding_model: stored
+            .embedding_model
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        embedding_base_url: stored
+            .embedding_base_url
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        embedding_api_key_env: stored
+            .embedding_api_key_env
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -292,6 +316,15 @@ fn validate_base_url(value: &str) -> Result<Url> {
         );
     }
     Ok(url)
+}
+
+/// Whether a base URL points at a loopback or private-network host, so a
+/// missing key is acceptable (local endpoints run keyless). Unparseable URLs
+/// are treated as non-local, failing closed.
+pub fn is_local_base_url(base_url: &str) -> bool {
+    Url::parse(base_url)
+        .map(|url| is_local_host(&url))
+        .unwrap_or(false)
 }
 
 fn is_local_host(url: &Url) -> bool {

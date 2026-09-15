@@ -1,13 +1,13 @@
 use std::{io::Read, time::Duration};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::{blocking::Client, header::CONTENT_LENGTH};
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::{
-    application::ports::ContextWorker,
-    domain::{Usage, WorkerRequest, WorkerResponse},
+    application::ports::{ContextWorker, DenseRanker},
+    domain::{Limits, Usage, WorkerRequest, WorkerResponse},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +334,158 @@ impl OpenAiCompatibleWorker {
     }
 }
 
+/// Dense re-ranker over any OpenAI-compatible `/embeddings` endpoint. Embeds the
+/// question and every candidate chunk in one request and returns their cosine
+/// similarities. Only the opt-in `--semantic` path builds one; the default
+/// `retrieve` never constructs it, so it stays fully local and key-free.
+///
+/// Same transport guarantees as the worker: redirects are never followed, env
+/// proxies are ignored, and request/response sizes and the timeout are bounded.
+pub struct EmbeddingDenseRanker {
+    base_url: String,
+    is_openrouter: bool,
+    model: String,
+    api_key: String,
+    limits: Limits,
+}
+
+impl EmbeddingDenseRanker {
+    pub fn new(base_url: &str, model: &str, api_key: &str, limits: Limits) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_owned();
+        let is_openrouter = Url::parse(&base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+            .is_some_and(|host| host == "openrouter.ai");
+        Self {
+            base_url,
+            is_openrouter,
+            model: model.to_owned(),
+            api_key: api_key.to_owned(),
+            limits,
+        }
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}/embeddings", self.base_url)
+    }
+}
+
+impl EmbeddingDenseRanker {
+    fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        let api_key = self.api_key.as_str();
+        let mut body = json!({ "model": self.model, "input": inputs });
+        if self.is_openrouter {
+            // Mirror the worker's privacy routing on OpenRouter: zero data
+            // retention and no data-collecting providers.
+            body["provider"] = json!({ "zdr": true, "data_collection": "deny" });
+        }
+        let encoded = serde_json::to_vec(&body)?;
+        if encoded.len() > self.limits.max_request_bytes {
+            bail!(
+                "embedding request exceeds {} bytes",
+                self.limits.max_request_bytes
+            );
+        }
+        let client = Client::builder()
+            .timeout(Duration::from_millis(self.limits.timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()?;
+        let mut post = client
+            .post(self.endpoint())
+            .header("content-type", "application/json")
+            .body(encoded);
+        if !api_key.is_empty() {
+            post = post.bearer_auth(api_key);
+        }
+        let mut response = post.send().context("embedding request failed")?;
+        let status = response.status();
+        let mut bytes = Vec::new();
+        response
+            .by_ref()
+            .take((self.limits.max_response_bytes + 1) as u64)
+            .read_to_end(&mut bytes)
+            .context("embedding request failed")?;
+        if bytes.len() > self.limits.max_response_bytes {
+            bail!(
+                "embedding response exceeds {} bytes",
+                self.limits.max_response_bytes
+            );
+        }
+        let parsed: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("embedding endpoint returned non-JSON HTTP {}", status))?;
+        if !status.is_success() {
+            let message = parsed
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed");
+            bail!("embedding HTTP {}: {message}", status.as_u16());
+        }
+        let data = parsed
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("embedding response has no data array"))?;
+        if data.len() != inputs.len() {
+            bail!(
+                "embedding endpoint returned {} vectors for {} inputs",
+                data.len(),
+                inputs.len()
+            );
+        }
+        data.iter()
+            .map(|item| {
+                item.get("embedding")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_f64().map(|float| float as f32))
+                            .collect::<Vec<f32>>()
+                    })
+                    .filter(|vector| !vector.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("embedding response has a malformed vector"))
+            })
+            .collect()
+    }
+}
+
+impl DenseRanker for EmbeddingDenseRanker {
+    fn similarities(&self, question: &str, candidates: &[String]) -> Result<Vec<f32>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut inputs = Vec::with_capacity(candidates.len() + 1);
+        inputs.push(question.to_owned());
+        inputs.extend(candidates.iter().cloned());
+        let vectors = self.embed(&inputs)?;
+        let (query, rest) = vectors
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("embedding response was empty"))?;
+        Ok(rest.iter().map(|vector| cosine(query, vector)).collect())
+    }
+}
+
+/// Cosine similarity of two vectors; `0.0` when either is degenerate or the
+/// lengths differ, so a bad vector never poisons the ranking.
+fn cosine(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut left_norm = 0.0f32;
+    let mut right_norm = 0.0f32;
+    for (a, b) in left.iter().zip(right.iter()) {
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        0.0
+    } else {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
+    }
+}
+
 /// Provider-side failures that a later identical request may survive: rate
 /// limits, request timeout, and the standard transient 5xx gateway statuses.
 fn is_transient_status(status: reqwest::StatusCode) -> bool {
@@ -386,11 +538,93 @@ fn result_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use crate::{
-        application::ports::ContextWorker,
+        application::ports::{ContextWorker, DenseRanker},
         domain::{Limits, WorkerRequest},
     };
 
-    use super::{OpenAiCompatibleWorker, result_schema};
+    use super::{EmbeddingDenseRanker, OpenAiCompatibleWorker, cosine, result_schema};
+
+    #[test]
+    fn cosine_is_one_for_parallel_and_zero_for_orthogonal() {
+        assert!((cosine(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert_eq!(cosine(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
+        // Mismatched or degenerate vectors never poison the ranking.
+        assert_eq!(cosine(&[1.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    /// Local HTTP stub for the embeddings transport: the query and candidates go
+    /// to `/embeddings` with the key as a Bearer token, and the returned vectors
+    /// yield cosine similarities that rank the aligned candidate first.
+    #[test]
+    fn dense_ranker_posts_to_embeddings_and_orders_by_similarity() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        fn read_request(stream: &mut TcpStream) -> String {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            String::from_utf8_lossy(&buf).to_string()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            // Query [1,0]; first candidate orthogonal, second aligned.
+            let body = br#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]},{"embedding":[1.0,0.0]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+            request
+        });
+
+        let ranker = EmbeddingDenseRanker::new(
+            &format!("http://127.0.0.1:{port}/v1"),
+            "embed-model",
+            "secret",
+            Limits::default(),
+        );
+        let sims = ranker
+            .similarities("query", &["orthogonal".to_owned(), "aligned".to_owned()])
+            .unwrap();
+        assert_eq!(sims.len(), 2);
+        assert!(
+            sims[1] > sims[0],
+            "aligned candidate must rank first: {sims:?}"
+        );
+
+        let request = server.join().unwrap().to_lowercase();
+        assert!(request.contains("post /v1/embeddings"), "{request}");
+        assert!(
+            request.contains("authorization: bearer secret"),
+            "{request}"
+        );
+    }
 
     fn request(model: &str) -> WorkerRequest {
         WorkerRequest {

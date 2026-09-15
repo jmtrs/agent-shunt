@@ -49,6 +49,14 @@ pub trait ContextWorker {
     fn analyze(&self, request: &WorkerRequest, api_key: &str) -> Result<WorkerResponse>;
 }
 
+/// Scores each candidate chunk's semantic similarity to the question, in the
+/// same order. The application fuses these with the lexical ranking; it never
+/// sees raw embeddings, and the implementation owns the model, key, and
+/// transport. Optional: only the opt-in `--semantic` path constructs one.
+pub trait DenseRanker {
+    fn similarities(&self, question: &str, candidates: &[String]) -> Result<Vec<f32>>;
+}
+
 pub trait CredentialResolver {
     fn resolve(&self) -> Result<ResolvedCredential>;
 }
