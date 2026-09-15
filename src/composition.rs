@@ -48,6 +48,10 @@ struct RecordedResult {
     usage: Option<Usage>,
     model: Option<String>,
     fallback: bool,
+    /// Savings telemetry for deterministic retrieve: whole size of the loaded
+    /// files vs the tokens actually delivered. Zero for every other operation.
+    baseline_bytes: usize,
+    delivered_tokens: usize,
 }
 
 fn default_executable() -> PathBuf {
@@ -100,6 +104,8 @@ impl Application {
                     files,
                     usage: None,
                     fallback: false,
+                    baseline_bytes: 0,
+                    delivered_tokens: 0,
                 })
             })
         } else {
@@ -116,6 +122,8 @@ impl Application {
                         files,
                         usage,
                         fallback,
+                        baseline_bytes: 0,
+                        delivered_tokens: 0,
                     })
                 },
             )
@@ -149,6 +157,8 @@ impl Application {
                     files,
                     usage,
                     fallback,
+                    baseline_bytes: 0,
+                    delivered_tokens: 0,
                 })
             })
         } else {
@@ -156,6 +166,9 @@ impl Application {
                 |(retrieval_result, documents)| {
                     let input_bytes = documents.iter().map(|document| document.bytes).sum();
                     let files = documents.len();
+                    // Savings = the whole loaded files versus the tokens returned.
+                    let baseline_bytes = retrieval_result.baseline_bytes;
+                    let delivered_tokens = retrieval_result.estimated_tokens;
                     Ok(RecordedResult {
                         value: serde_json::to_value(retrieval_result)?,
                         input_bytes,
@@ -163,6 +176,8 @@ impl Application {
                         usage: None,
                         model: None,
                         fallback: false,
+                        baseline_bytes,
+                        delivered_tokens,
                     })
                 },
             )
@@ -307,7 +322,17 @@ impl Application {
         started: Instant,
         result: &Result<RecordedResult>,
     ) {
-        let (success, input_bytes, files, usage, used_model, fallback, error_kind) = match result {
+        let (
+            success,
+            input_bytes,
+            files,
+            usage,
+            used_model,
+            fallback,
+            error_kind,
+            baseline_bytes,
+            delivered_tokens,
+        ) = match result {
             Ok(result) => (
                 true,
                 result.input_bytes,
@@ -316,6 +341,8 @@ impl Application {
                 result.model.as_deref().or(model),
                 result.fallback,
                 None,
+                result.baseline_bytes,
+                result.delivered_tokens,
             ),
             Err(error) => {
                 let exhausted = error.downcast_ref::<scan::FallbackExhausted>();
@@ -327,6 +354,8 @@ impl Application {
                     model,
                     exhausted.is_some(),
                     Some(classify_error(error)),
+                    0,
+                    0,
                 )
             }
         };
@@ -344,6 +373,8 @@ impl Application {
             cost: usage.and_then(|value| value.cost),
             fallback,
             error_kind,
+            baseline_bytes,
+            delivered_tokens,
         };
         let _ = self.metrics.record(&metric);
     }

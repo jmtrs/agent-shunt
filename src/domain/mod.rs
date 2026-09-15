@@ -96,6 +96,11 @@ pub struct RetrieveResult {
     pub chunks: Vec<RetrievedChunk>,
     pub estimated_tokens: usize,
     pub truncated: bool,
+    /// Whole size of the files retrieval loaded, before chunking — the token
+    /// cost the caller would have paid reading them entire. Kept out of the
+    /// output contract (`skip`); it feeds the savings telemetry only.
+    #[serde(skip)]
+    pub baseline_bytes: usize,
 }
 
 // No `deny_unknown_fields`: a worker in `json_object` mode may attach extra
@@ -239,6 +244,20 @@ pub struct MetricRecord {
     /// Absent (and `default` on read) for successful runs and legacy records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<String>,
+    /// Whole size of the files a deterministic retrieve loaded — the baseline
+    /// the caller would have read without bounded retrieval. Zero (and `default`
+    /// on read) for other operations and legacy records; paired with
+    /// `delivered_tokens`, it lets the summary report real token savings.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub baseline_bytes: usize,
+    /// Tokens the retrieve actually returned. Zero for non-retrieve operations
+    /// and legacy records.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub delivered_tokens: usize,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize)]

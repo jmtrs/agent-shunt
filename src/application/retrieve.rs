@@ -305,6 +305,7 @@ pub fn execute(
             truncated: selected.len() < available_count,
             chunks: selected,
             estimated_tokens: total_tokens,
+            baseline_bytes: loaded.total_bytes,
         },
         selected_documents,
     ))

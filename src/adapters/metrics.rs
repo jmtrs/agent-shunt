@@ -46,7 +46,17 @@ impl JsonlMetrics {
             summary.total_duration_ms += record.duration_ms;
             summary.total_tokens += record.total_tokens.unwrap_or(0);
             summary.total_cost += record.cost.unwrap_or(0.0);
+            summary.baseline_tokens += (record.baseline_bytes / 4) as u64;
+            summary.delivered_tokens += record.delivered_tokens as u64;
         }
+        summary.saved_tokens = summary
+            .baseline_tokens
+            .saturating_sub(summary.delivered_tokens);
+        summary.savings_pct = if summary.baseline_tokens > 0 {
+            100.0 * summary.saved_tokens as f64 / summary.baseline_tokens as f64
+        } else {
+            0.0
+        };
         Ok(summary)
     }
 }
@@ -85,6 +95,15 @@ pub struct MetricsSummary {
     pub total_duration_ms: u128,
     pub total_tokens: u64,
     pub total_cost: f64,
+    /// Token cost the caller would have paid reading whole files, summed over
+    /// deterministic retrieves (baseline_bytes / 4).
+    pub baseline_tokens: u64,
+    /// Tokens those retrieves actually delivered.
+    pub delivered_tokens: u64,
+    /// `baseline_tokens - delivered_tokens`: tokens the tool kept out of context.
+    pub saved_tokens: u64,
+    /// Savings as a percentage of the baseline (0.0 when no retrieves recorded).
+    pub savings_pct: f64,
 }
 
 #[cfg(test)]
@@ -116,11 +135,47 @@ mod tests {
                 cost: Some(0.001),
                 fallback: false,
                 error_kind: None,
+                baseline_bytes: 0,
+                delivered_tokens: 0,
             })
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(!content.contains("question"));
         assert!(!content.contains("path"));
         assert_eq!(metrics.summary().unwrap().total_tokens, 25);
+    }
+
+    /// Deterministic retrieves record the whole loaded size and the delivered
+    /// tokens, so the summary reports real savings; zero-baseline records
+    /// (scan, failures, legacy) do not distort it.
+    #[test]
+    fn summary_reports_token_savings() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("metrics.jsonl");
+        let metrics = JsonlMetrics::new(path);
+        let retrieve = |baseline_bytes, delivered_tokens| MetricRecord {
+            timestamp: Utc::now(),
+            operation: "retrieve".to_owned(),
+            success: true,
+            model: None,
+            duration_ms: 5,
+            input_bytes: delivered_tokens,
+            files: 1,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            cost: None,
+            fallback: false,
+            error_kind: None,
+            baseline_bytes,
+            delivered_tokens,
+        };
+        // 4000 bytes = 1000 baseline tokens; 250 delivered → 750 saved (75%).
+        metrics.record(&retrieve(4_000, 250)).unwrap();
+        let summary = metrics.summary().unwrap();
+        assert_eq!(summary.baseline_tokens, 1_000);
+        assert_eq!(summary.delivered_tokens, 250);
+        assert_eq!(summary.saved_tokens, 750);
+        assert!((summary.savings_pct - 75.0).abs() < 0.01);
     }
 }
