@@ -49,12 +49,17 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum HookCommand {
+    // 16 KiB (~4k tokens): the point where a bounded retrieval beats reading the
+    // whole file. The installed hook command pins no flag, so this default is
+    // what fires at runtime; 32 KiB only caught the largest ~5% of source files,
+    // leaving the guardrail idle on most whole-file reads. Override per-invocation
+    // with --threshold-bytes.
     CodexPreToolUse {
-        #[arg(long, default_value_t = 32_768)]
+        #[arg(long, default_value_t = 16_384)]
         threshold_bytes: u64,
     },
     ClaudePreToolUse {
-        #[arg(long, default_value_t = 32_768)]
+        #[arg(long, default_value_t = 16_384)]
         threshold_bytes: u64,
     },
 }
