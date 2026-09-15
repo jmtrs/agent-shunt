@@ -108,6 +108,23 @@ pub struct Finding {
     pub start_line: usize,
     pub end_line: usize,
     pub summary: String,
+    /// Copy-paste command that prints this finding's exact source lines, so
+    /// the host can verify the answer against the real file. Populated during
+    /// validation; never trusted from the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_hint: Option<String>,
+}
+
+/// A finding the worker produced that failed source validation, kept for
+/// disclosure instead of silently dropped or failing the whole response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedFinding {
+    #[serde(flatten)]
+    pub finding: Finding,
+    /// Stable reason token: `unknown path`, `summary too long`, or
+    /// `line range not in retrieved context`.
+    pub reason: String,
 }
 
 /// One locally changed file in the working tree: the changed line ranges in
@@ -130,6 +147,10 @@ pub struct ScanResult {
     pub version: u8,
     pub answer: String,
     pub findings: Vec<Finding>,
+    /// Worker findings that failed source validation, disclosed rather than
+    /// shown: a host reading `findings` never sees an unverified reference.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_findings: Vec<DroppedFinding>,
     pub uncertainties: Vec<String>,
     pub files_read: Vec<String>,
     pub trust: String,

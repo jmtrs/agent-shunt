@@ -256,34 +256,34 @@ pub fn validate_worker_result(
     if parsed.findings.len() > MAX_FINDINGS || parsed.uncertainties.len() > MAX_UNCERTAINTIES {
         bail!("model response contains too many items");
     }
-    for (index, finding) in parsed.findings.iter().enumerate() {
-        check_utf16(
-            &finding.summary,
-            &format!("findings[{index}].summary"),
-            MAX_SUMMARY_UTF16,
-        )?;
-        let Some(document) = documents.iter().find(|doc| doc.path == finding.path) else {
-            bail!(
-                "finding {index} references an unknown path: {}",
-                finding.path
-            );
-        };
-        let range = crate::domain::LineRange {
-            start_line: finding.start_line,
-            end_line: finding.end_line,
-        };
-        if range.start_line == 0
-            || range.end_line < range.start_line
-            || range.end_line > document.line_count
-            || !merge_adjacent_ranges(&document.allowed_ranges)
-                .iter()
-                .any(|allowed| allowed.contains(range))
-        {
-            bail!(
-                "finding {index} has an invalid line range for {}",
-                finding.path
-            );
+    // Drop-and-disclose: a finding that fails source validation is removed
+    // and reported in `dropped_findings` rather than failing the whole
+    // response, so one hallucinated reference cannot cost the valid ones.
+    // Only when *every* finding is ungrounded is the response rejected (and
+    // the model-fallback loop retried) — then nothing in it was verified.
+    let mut findings = Vec::with_capacity(parsed.findings.len());
+    let mut dropped_findings = Vec::new();
+    for mut finding in parsed.findings {
+        match validate_finding(&finding, documents) {
+            Ok(()) => {
+                finding.verify_hint = Some(format!(
+                    "sed -n '{},{}p' {}",
+                    finding.start_line,
+                    finding.end_line,
+                    shell_quoted(&finding.path)
+                ));
+                findings.push(finding);
+            }
+            Err(reason) => dropped_findings.push(crate::domain::DroppedFinding { finding, reason }),
         }
+    }
+    if !dropped_findings.is_empty() && findings.is_empty() {
+        let reasons = dropped_findings
+            .iter()
+            .map(|dropped| dropped.reason.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("all findings were dropped: {reasons}");
     }
     for (index, uncertainty) in parsed.uncertainties.iter().enumerate() {
         check_utf16(
@@ -295,13 +295,57 @@ pub fn validate_worker_result(
     Ok(ScanResult {
         version: 1,
         answer: parsed.answer,
-        findings: parsed.findings,
+        findings,
+        dropped_findings,
         uncertainties: parsed.uncertainties,
         files_read: documents.iter().map(|doc| doc.path.clone()).collect(),
         trust: "untrusted-model-output-with-validated-source-references".to_owned(),
         model,
         usage,
     })
+}
+
+/// Validates one finding against the retrieved documents, returning a stable
+/// reason token on failure.
+fn validate_finding(
+    finding: &crate::domain::Finding,
+    documents: &[crate::domain::Document],
+) -> std::result::Result<(), String> {
+    if check_utf16(&finding.summary, "finding.summary", MAX_SUMMARY_UTF16).is_err() {
+        return Err("summary too long".to_owned());
+    }
+    let Some(document) = documents.iter().find(|doc| doc.path == finding.path) else {
+        return Err("unknown path".to_owned());
+    };
+    let range = crate::domain::LineRange {
+        start_line: finding.start_line,
+        end_line: finding.end_line,
+    };
+    if range.start_line == 0
+        || range.end_line < range.start_line
+        || range.end_line > document.line_count
+        || !merge_adjacent_ranges(&document.allowed_ranges)
+            .iter()
+            .any(|allowed| allowed.contains(range))
+    {
+        return Err("line range not in retrieved context".to_owned());
+    }
+    Ok(())
+}
+
+/// Quotes a path for a copy-paste shell command: bare when it needs no
+/// quoting, single-quoted with escaping otherwise. A leading `-` is always
+/// quoted so the command cannot parse the path as a flag.
+fn shell_quoted(path: &str) -> String {
+    if !path.starts_with('-')
+        && path.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+        })
+    {
+        path.to_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
 }
 
 fn check_utf16(value: &str, field: &str, maximum: usize) -> Result<()> {
@@ -386,8 +430,14 @@ mod tests {
             validate_worker_result(
                 &spanning.to_string(),
                 &[doc(vec![
-                    LineRange { start_line: 1, end_line: 33 },
-                    LineRange { start_line: 40, end_line: 67 },
+                    LineRange {
+                        start_line: 1,
+                        end_line: 33
+                    },
+                    LineRange {
+                        start_line: 40,
+                        end_line: 67
+                    },
                 ])],
                 "m".to_owned(),
                 None,
@@ -400,8 +450,14 @@ mod tests {
             validate_worker_result(
                 &spanning.to_string(),
                 &[doc(vec![
-                    LineRange { start_line: 1, end_line: 20 },
-                    LineRange { start_line: 200, end_line: 220 },
+                    LineRange {
+                        start_line: 1,
+                        end_line: 20
+                    },
+                    LineRange {
+                        start_line: 200,
+                        end_line: 220
+                    },
                 ])],
                 "m".to_owned(),
                 None,
@@ -428,6 +484,38 @@ mod tests {
             "uncertainties": []
         });
         assert!(validate_worker_result(&unseen.to_string(), &docs, "m".to_owned(), None).is_err());
+    }
+
+    #[test]
+    fn drops_ungrounded_findings_but_keeps_valid_ones() {
+        // One valid finding and two invalid ones: the response is accepted,
+        // the valid finding gains a verify hint, and the invalid ones are
+        // disclosed with stable reasons instead of shown or fatal.
+        let raw = json!({
+            "answer": "partly grounded",
+            "findings": [
+                {"path": "src/a.rs", "startLine": 1, "endLine": 2, "summary": "evidence"},
+                {"path": "missing.rs", "startLine": 1, "endLine": 1, "summary": "hallucinated"},
+                {"path": "src/a.rs", "startLine": 99, "endLine": 100, "summary": "beyond file"}
+            ],
+            "uncertainties": []
+        });
+        let docs = [document(vec![LineRange {
+            start_line: 1,
+            end_line: 3,
+        }])];
+        let result = validate_worker_result(&raw.to_string(), &docs, "m".to_owned(), None).unwrap();
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(
+            result.findings[0].verify_hint.as_deref(),
+            Some("sed -n '1,2p' src/a.rs")
+        );
+        assert_eq!(result.dropped_findings.len(), 2);
+        assert_eq!(result.dropped_findings[0].reason, "unknown path");
+        assert_eq!(
+            result.dropped_findings[1].reason,
+            "line range not in retrieved context"
+        );
     }
 
     #[test]

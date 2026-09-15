@@ -76,9 +76,8 @@ fn apply_globs(command: &mut Command, globs: &[String]) {
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "pdf", "zip", "gz", "tar", "bz2",
     "xz", "7z", "rar", "tgz", "jar", "war", "class", "exe", "dll", "so", "dylib", "bin", "dat",
-    "wasm",
-    "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "mkv", "wav", "flac", "psd",
-    "lockb", "node", "pyc", "obj",
+    "wasm", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "mkv", "wav", "flac",
+    "psd", "lockb", "node", "pyc", "obj",
 ];
 
 /// Scales the (logarithmic) inverse document frequency into integer term
@@ -117,15 +116,21 @@ impl CodeSearch for RipgrepSearch {
         }
         // Search and score on stems so a plural query term still recovers the
         // singular in code: `paths` -> `path`, `questions` -> `question`.
-        let stems = terms.iter().map(|term| stem(term)).collect::<Vec<_>>();
-        let matchers = term_matchers(&stems);
+        // Each term carries its cross-convention spellings so a camelCase
+        // identifier also matches its snake_case or kebab-case rendering.
+        let forms = terms
+            .iter()
+            .map(|term| term_forms(term))
+            .collect::<Vec<_>>();
+        let matchers = term_matchers(&forms);
         let intrinsic = intrinsic_weights(&terms);
-        let mut filename_raw = filename_hits(root, &stems, globs, 10_000)?;
+        let mut filename_raw = filename_hits(root, &forms, globs, 10_000)?;
         let mut hits: Vec<SearchHit> = Vec::new();
         let raw_hit_limit = max_hits.saturating_mul(50).clamp(max_hits, 5_000);
-        let pattern = stems
+        let pattern = forms
             .iter()
-            .map(|term| regex::escape(term))
+            .flatten()
+            .map(|form| regex::escape(form))
             .collect::<Vec<_>>()
             .join("|");
         let mut command = Command::new("rg");
@@ -295,7 +300,7 @@ impl CodeSearch for RipgrepSearch {
 
 fn filename_hits(
     root: &Path,
-    terms: &[String],
+    forms: &[Vec<String>],
     globs: &[String],
     scan_limit: usize,
 ) -> Result<Vec<SearchHit>> {
@@ -333,8 +338,8 @@ fn filename_hits(
             continue;
         }
         let normalized = path.to_lowercase();
-        let matched_terms = terms.iter().enumerate().fold(0u16, |mask, (index, term)| {
-            mask | (u16::from(normalized.contains(&term.to_lowercase())) << index)
+        let matched_terms = forms.iter().enumerate().fold(0u16, |mask, (index, forms)| {
+            mask | (u16::from(forms.iter().any(|form| normalized.contains(form.as_str()))) << index)
         });
         if matched_terms != 0 {
             // Scored later against inverse-document-frequency term weights so a
@@ -400,23 +405,84 @@ fn query_terms(question: &str) -> Vec<String> {
         .collect()
 }
 
-/// Compiles one case-insensitive matcher per query term. The term must begin at
-/// a token boundary — the string start or a non-alphanumeric character, which
-/// includes `_` so `validate` still matches `validate_question`. The tail is
-/// left open so morphology still counts: `path` matches `paths`, `exclude`
-/// matches `excludes`. Requiring the left boundary rejects the substring noise
-/// the caller reported, e.g. `table` inside `constable` or `comfortable`.
-fn term_matchers(terms: &[String]) -> Vec<Regex> {
-    terms
+/// Compiles one case-insensitive matcher per query term. The term (in any of
+/// its cross-convention spellings, see [`term_forms`]) must begin at a token
+/// boundary — the string start or a non-alphanumeric character, which includes
+/// `_` so `validate` still matches `validate_question`. The tail is left open
+/// so morphology still counts: `path` matches `paths`, `exclude` matches
+/// `excludes`. Requiring the left boundary rejects the substring noise the
+/// caller reported, e.g. `table` inside `constable` or `comfortable`.
+fn term_matchers(forms: &[Vec<String>]) -> Vec<Regex> {
+    forms
         .iter()
-        .map(|term| {
-            Regex::new(&format!(
-                r"(?i)(?:^|[^\p{{L}}\p{{N}}]){}",
-                regex::escape(term)
-            ))
-            .expect("valid term regex")
+        .map(|forms| {
+            let alternation = forms
+                .iter()
+                .map(|form| regex::escape(form))
+                .collect::<Vec<_>>()
+                .join("|");
+            Regex::new(&format!(r"(?i)(?:^|[^\p{{L}}\p{{N}}])(?:{alternation})"))
+                .expect("valid term regex")
         })
         .collect()
+}
+
+/// Alternate spellings of one query term across identifier conventions.
+/// A compound identifier appears in code as camelCase, snake_case or
+/// kebab-case (kebab doubles as URL-path style), so a query in one
+/// convention must recover matches written in another: `ExcelGridSelector`
+/// also matches `excel_grid_selector` and `excel-grid-selector`. All forms
+/// are stemmed and lowercased; matching itself is case-insensitive.
+fn term_forms(term: &str) -> Vec<String> {
+    let words = split_words(term);
+    let mut forms = vec![stem(term)];
+    if words.len() > 1 {
+        for joined in [words.join("_"), words.join("-"), words.concat()] {
+            forms.push(stem(&joined));
+        }
+    }
+    let mut seen = HashSet::new();
+    forms
+        .into_iter()
+        .filter(|form| seen.insert(form.clone()))
+        .collect()
+}
+
+/// Splits a compound identifier into words on `_`, `-`, `.`, `:`, `/`, and
+/// camelCase boundaries — lower-to-upper starts a word, and an uppercase run
+/// only continues while the next character is not lowercase, so `HTTPServer`
+/// splits as `HTTP`, `Server` and `v2Router` as `v2`, `Router`.
+fn split_words(term: &str) -> Vec<String> {
+    let chars: Vec<char> = term.chars().collect();
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for (index, &character) in chars.iter().enumerate() {
+        if matches!(character, '_' | '-' | '.' | ':' | '/') {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if character.is_uppercase() && !current.is_empty() {
+            // A word boundary at an uppercase character happens when the
+            // previous character is not uppercase (lower/digit → upper) or
+            // when the next one is lowercase (end of an acronym run), so
+            // `HTTPServer` splits as `HTTP`, `Server`.
+            let previous_upper = current
+                .chars()
+                .last()
+                .is_some_and(|last| last.is_uppercase());
+            let next_lower = chars.get(index + 1).is_some_and(|next| next.is_lowercase());
+            if !previous_upper || next_lower {
+                words.push(std::mem::take(&mut current));
+            }
+        }
+        current.push(character);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 /// Base weight before inverse-document-frequency scaling. Identifier-shaped
@@ -489,6 +555,55 @@ mod tests {
         assert_eq!(
             RipgrepSearch.terms("Dónde está authentication validation?"),
             ["authentication", "validation"]
+        );
+    }
+
+    #[test]
+    fn splits_compound_identifiers_into_words() {
+        use super::split_words;
+        let words = |term: &str| split_words(term).join(" ");
+        assert_eq!(words("ExcelGridSelector"), "Excel Grid Selector");
+        assert_eq!(words("excel_grid_selector"), "excel grid selector");
+        assert_eq!(words("excel-grid-selector"), "excel grid selector");
+        assert_eq!(
+            words("createTableListTableTransaction"),
+            "create Table List Table Transaction"
+        );
+        assert_eq!(words("HTTPServer"), "HTTP Server");
+        assert_eq!(words("v2Router"), "v2 Router");
+        assert_eq!(words("table"), "table");
+    }
+
+    #[test]
+    fn compound_terms_match_across_naming_conventions() {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("snake.rs"),
+            "fn excel_grid_selector() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("camel.rs"),
+            "const createTableListTableTransaction = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("route.ts"),
+            "fetch('/create-table-list-table-transaction');\n",
+        )
+        .unwrap();
+        let hits = |question: &str| {
+            RipgrepSearch
+                .search(root.path(), question, 20, &[])
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hits("ExcelGridSelector"), vec!["snake.rs".to_owned()]);
+        assert_eq!(
+            hits("create_table_list_table_transaction"),
+            vec!["camel.rs".to_owned(), "route.ts".to_owned()]
         );
     }
 
