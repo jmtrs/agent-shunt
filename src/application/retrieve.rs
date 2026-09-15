@@ -21,6 +21,14 @@ pub struct RetrieveInput {
     /// When set, restricts retrieval to locally changed files so a review
     /// question covers exactly what the caller touched, not the whole tree.
     pub scope: Option<ChangeScope>,
+    /// MMR relevance/diversity trade-off; defaults to [`MMR_LAMBDA`].
+    pub mmr_lambda: f64,
+    /// Largest enclosing block a hit may expand into; defaults to
+    /// [`MAX_BLOCK_LINES`].
+    pub max_block_lines: usize,
+    /// Relevance floor as a percentage of the top hit; defaults to
+    /// [`MIN_SCORE_PERCENT`].
+    pub min_score_percent: usize,
 }
 
 /// Restricts retrieval to locally changed files (tracked changes against a
@@ -43,7 +51,7 @@ const SCOPE_HUNK_BOOST: usize = 3;
 /// context window instead. Sized to a generous function body: big enough to
 /// collapse a scatter of same-function windows into one chunk, bounded enough
 /// that one hit never swallows the budget.
-const MAX_BLOCK_LINES: usize = 48;
+pub const MAX_BLOCK_LINES: usize = 48;
 
 /// Most chunks any single file may contribute to the result. Generous enough
 /// that a genuinely file-localized question still gets deep coverage, tight
@@ -54,7 +62,7 @@ const MAX_CHUNKS_PER_FILE: usize = 6;
 /// MMR relevance/diversity trade-off. At 0.7 relevance leads, but a redundant
 /// chunk is still pushed down the order enough to lose its slot to fresh
 /// evidence under a tight budget.
-const MMR_LAMBDA: f64 = 0.7;
+pub const MMR_LAMBDA: f64 = 0.7;
 
 /// Floor similarity between two chunks of the same file, regardless of content
 /// overlap. Reproduces the one-per-path-first spread: another chunk of an
@@ -66,7 +74,7 @@ const SAME_PATH_SIM: f64 = 0.5;
 /// selection. The ranked tail of a broad question is weakly related — dozens
 /// of files can match faintly — and would otherwise fill the whole token
 /// budget with noise that never answers the question.
-const MIN_SCORE_PERCENT: usize = 15;
+pub const MIN_SCORE_PERCENT: usize = 15;
 
 /// Per-chunk cost of the JSON envelope the caller actually receives: field
 /// names, quotes, structure, newline escaping, and pretty-print whitespace,
@@ -231,7 +239,7 @@ pub fn execute(
                 // overlapping fixed windows; fall back to the fixed window for
                 // top-level statements or blocks too large to be worth it.
                 let range = document
-                    .enclosing_block(*line, MAX_BLOCK_LINES)
+                    .enclosing_block(*line, input.max_block_lines)
                     .unwrap_or(LineRange {
                         start_line: line.saturating_sub(input.context_lines).max(1),
                         end_line: (*line + input.context_lines).min(document.line_count),
@@ -293,7 +301,7 @@ pub fn execute(
         .unwrap_or(0);
     if max_score > 0 {
         candidates.retain(|candidate| {
-            candidate.score.saturating_mul(100) >= max_score.saturating_mul(MIN_SCORE_PERCENT)
+            candidate.score.saturating_mul(100) >= max_score.saturating_mul(input.min_score_percent)
         });
     }
 
@@ -320,7 +328,7 @@ pub fn execute(
                 .iter()
                 .map(|&chosen| similarity(candidate, chosen, &candidates, &token_sets))
                 .fold(0.0_f64, f64::max);
-            let value = MMR_LAMBDA * relevance - (1.0 - MMR_LAMBDA) * redundancy;
+            let value = input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
             // Strict improvement keeps the earliest (higher-scoring, path-sorted)
             // candidate on ties, so ordering stays deterministic.
             if value > best_value + f64::EPSILON {
@@ -440,7 +448,43 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
 /// use this so the token budget matches the delivered footprint instead of
 /// undercounting by the envelope.
 fn delivered_tokens(content: &str, path: &str) -> usize {
-    (content.len() + path.len()).div_ceil(4) + ENVELOPE_TOKENS_PER_CHUNK
+    estimate_tokens(content) + estimate_tokens(path) + ENVELOPE_TOKENS_PER_CHUNK
+}
+
+/// Approximate BPE token count of delivered text. Word runs tokenize at roughly
+/// four characters each (min one token), symbol runs at two (dense punctuation
+/// only partly merges), and whitespace is free but breaks runs. This tracks a
+/// real tokenizer far better than a flat `len / 4`, which undercounts the
+/// symbol-dense punctuation of source code and so silently lets the token
+/// budget overshoot the delivered footprint. It errs conservative (never below
+/// a real count), so the budget is a ceiling the output cannot breach.
+fn estimate_tokens(text: &str) -> usize {
+    let mut tokens = 0usize;
+    let mut run = 0usize;
+    let mut run_is_word = false;
+    for character in text.chars() {
+        let is_word = character.is_alphanumeric() || character == '_';
+        let is_space = character.is_whitespace();
+        if is_space || is_word != run_is_word {
+            tokens += run_tokens(run, run_is_word);
+            run = 0;
+            run_is_word = is_word;
+        }
+        if !is_space {
+            run += 1;
+        }
+    }
+    tokens + run_tokens(run, run_is_word)
+}
+
+fn run_tokens(run: usize, is_word: bool) -> usize {
+    if run == 0 {
+        0
+    } else if is_word {
+        run.div_ceil(4).max(1)
+    } else {
+        run.div_ceil(2).max(1)
+    }
 }
 
 /// Lowercased identifier-ish tokens of a chunk's content, for redundancy
@@ -517,7 +561,22 @@ mod tests {
         domain::{Document, FileChange, Limits, LineRange, LoadedDocuments, SearchHit},
     };
 
-    use super::{ChangeScope, RetrieveInput, execute};
+    use super::{
+        ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput,
+        estimate_tokens, execute,
+    };
+
+    #[test]
+    fn estimate_tokens_counts_symbol_dense_code_above_a_flat_quarter() {
+        // Punctuation-heavy code tokenizes near 1:1, so the estimate must exceed
+        // the old `len / 4`, which undercounted and let the budget overshoot.
+        let code = "let x = foo(a, b).bar()?;";
+        assert!(estimate_tokens(code) > code.len() / 4);
+        // Whitespace is free: indentation does not inflate the count.
+        assert_eq!(estimate_tokens("   word"), estimate_tokens("word"));
+        // A lone word stays cheap.
+        assert_eq!(estimate_tokens("path"), 1);
+    }
 
     struct Search {
         globs: Mutex<Vec<Vec<String>>>,
@@ -602,6 +661,9 @@ mod tests {
             max_hits: 10,
             globs: Vec::new(),
             scope: None,
+            mmr_lambda: MMR_LAMBDA,
+            max_block_lines: MAX_BLOCK_LINES,
+            min_score_percent: MIN_SCORE_PERCENT,
         }
     }
 
@@ -715,10 +777,11 @@ mod tests {
 
     #[test]
     fn mmr_prefers_a_distinct_chunk_over_a_higher_scoring_near_duplicate() {
-        // Budget fits exactly two chunks. Score order would take a.rs then its
-        // near-duplicate b.rs; MMR takes a.rs then the distinct c.rs instead.
+        // Budget fits exactly two of the three equal-cost chunks. Score order
+        // would take a.rs then its near-duplicate b.rs; MMR takes a.rs then the
+        // distinct c.rs instead.
         let tight = RetrieveInput {
-            budget_tokens: 108,
+            budget_tokens: 130,
             context_lines: 0,
             ..input()
         };

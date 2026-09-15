@@ -64,21 +64,16 @@ impl Document {
 
     /// Expands a hit to its enclosing indentation block: the nearest earlier
     /// non-blank line at a strictly smaller indent (the definition header),
-    /// down through every line more indented than that header. Works on brace
-    /// and indent styles alike, with no language grammar. Returns `None` when
-    /// no smaller-indent header exists (a top-level statement) or the block
+    /// down through every line more indented than that header, then upward over
+    /// the header's own signature (Allman braces / multi-line signatures) and
+    /// any decorators, attributes, or doc-comments directly above it. Works on
+    /// brace and indent styles alike, with no language grammar. Returns `None`
+    /// when no smaller-indent header exists (a top-level statement) or the block
     /// would exceed `max_span` lines, so the caller keeps its fixed window
     /// instead of swallowing a whole impl or file.
     pub fn enclosing_block(&self, line: usize, max_span: usize) -> Option<LineRange> {
-        let indent = |text: &str| -> Option<usize> {
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text.len() - text.trim_start().len())
-            }
-        };
         let index = line.checked_sub(1)?;
-        let hit_indent = indent(self.lines.get(index)?)?;
+        let hit_indent = line_indent(self.lines.get(index)?)?;
         // Header: nearest earlier non-blank line indented less than the hit.
         let mut cursor = index;
         let header = loop {
@@ -86,7 +81,7 @@ impl Document {
                 return None;
             }
             cursor -= 1;
-            if let Some(current) = indent(&self.lines[cursor])
+            if let Some(current) = line_indent(&self.lines[cursor])
                 && current < hit_indent
             {
                 break (cursor, current);
@@ -100,10 +95,36 @@ impl Document {
         let mut cursor = index;
         while cursor + 1 < self.lines.len() {
             cursor += 1;
-            match indent(&self.lines[cursor]) {
+            match line_indent(&self.lines[cursor]) {
                 Some(current) if current > header_indent => end = cursor,
                 Some(_) => break,
                 None => {}
+            }
+        }
+        // Signature: a delimiter-led header (a lone `{`, or a `) -> T {`
+        // continuation) is not the real definition line — the signature sits
+        // above it. Absorb the contiguous run of non-blank lines at or beyond
+        // the header's indent, so an Allman brace or a multi-line signature
+        // keeps its `fn foo(...)` / `int foo(int x)` line.
+        let mut start = start;
+        if is_continuation_line(&self.lines[start]) {
+            while start > 0 {
+                match line_indent(&self.lines[start - 1]) {
+                    Some(above) if above >= header_indent => start -= 1,
+                    _ => break,
+                }
+            }
+        }
+        // Decorators, attributes, and doc-comments directly above the header at
+        // its own indent belong to the definition (`@app.route`, `#[test]`,
+        // `///`), so a hit in the body still carries what the code *is*.
+        while start > 0 {
+            let above = &self.lines[start - 1];
+            match line_indent(above) {
+                Some(indent) if indent == header_indent && is_annotation_line(above) => {
+                    start -= 1;
+                }
+                _ => break,
             }
         }
         let range = LineRange {
@@ -137,6 +158,40 @@ impl Document {
             end_line: end,
         }
     }
+}
+
+/// Indentation width of a line in bytes, or `None` for a blank line (one made
+/// only of whitespace carries no structural indent).
+fn line_indent(text: &str) -> Option<usize> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text.len() - text.trim_start().len())
+    }
+}
+
+/// A header line that only continues the construct above it rather than opening
+/// it: a lone brace (`{`), or a signature tail that leads with a closing
+/// delimiter (`) -> T {`). Such a line's real definition — the `fn`/`def`/type
+/// signature — lives on the preceding line(s), so the block start climbs past
+/// it. A normal header (`fn foo() {`, `def handler():`) leads with a word and is
+/// not a continuation.
+fn is_continuation_line(text: &str) -> bool {
+    let trimmed = text.trim();
+    match trimmed.chars().next() {
+        None => false,
+        Some(first) => ")]}".contains(first) || trimmed.chars().all(|c| "{([ \t".contains(c)),
+    }
+}
+
+/// A decorator, attribute, or comment/doc line that annotates the definition
+/// directly below it: `@decorator`, `#[attr]`, `///`/`//`/`/* */`/`*` doc, `#`
+/// (Python/shell/Ruby), `--` (SQL/Lua), `;;` (Lisp/asm). Absorbed upward into a
+/// block so the chunk carries what the code *is*, not just its body.
+fn is_annotation_line(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    const PREFIXES: &[&str] = &["@", "#[", "///", "//", "/*", "*/", "*", "#", "--", ";;"];
+    PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +458,54 @@ mod tests {
         source.push_str("}\n");
         let doc = document(&source);
         assert_eq!(doc.enclosing_block(30, 48), None);
+    }
+
+    #[test]
+    fn enclosing_block_keeps_the_signature_in_allman_brace_style() {
+        // C/Go/Java/C# style: the `{` sits on its own line, so the naive header
+        // is the brace and the signature above it must be pulled in.
+        let doc = document("int foo(int x)\n{\n    return x;\n}\n");
+        let range = doc.enclosing_block(3, 48).unwrap();
+        assert_eq!(
+            range,
+            LineRange {
+                start_line: 1,
+                end_line: 3
+            }
+        );
+    }
+
+    #[test]
+    fn enclosing_block_keeps_a_multi_line_signature() {
+        // The `) -> T {` continuation is not the definition line; the block
+        // climbs to `fn foo(` and includes the parameter lines.
+        let doc = document("fn foo(\n    a: i32,\n) -> T {\n    body(a);\n}\n");
+        let range = doc.enclosing_block(4, 48).unwrap();
+        assert_eq!(range.start_line, 1);
+    }
+
+    #[test]
+    fn enclosing_block_absorbs_a_python_decorator() {
+        let doc = document("@app.route(\"/\")\ndef handler():\n    return ok()\n");
+        let range = doc.enclosing_block(3, 48).unwrap();
+        assert_eq!(range.start_line, 1);
+    }
+
+    #[test]
+    fn enclosing_block_absorbs_rust_attribute_and_doc() {
+        let doc =
+            document("/// Does the thing.\n#[test]\nfn checks() {\n    assert!(work());\n}\n");
+        let range = doc.enclosing_block(4, 48).unwrap();
+        assert_eq!(range.start_line, 1);
+    }
+
+    #[test]
+    fn enclosing_block_does_not_absorb_across_a_blank_line() {
+        // An unrelated statement two lines up, separated by a blank, is not part
+        // of the definition and must stay out of the chunk.
+        let doc = document("let unrelated = 1;\n\ndef handler():\n    return ok()\n");
+        let range = doc.enclosing_block(4, 48).unwrap();
+        assert_eq!(range.start_line, 3);
     }
 
     #[test]

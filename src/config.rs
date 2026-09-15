@@ -32,6 +32,11 @@ pub struct Config {
     /// last so it overrides tool defaults. The escape hatch for any provider
     /// parameter the built-in fields do not cover.
     pub extra_body: Value,
+    /// Optional retrieval-tuning overrides. When set they supply the default a
+    /// bare `retrieve` uses; an explicit CLI flag still wins. Validated on load.
+    pub mmr_lambda: Option<f64>,
+    pub max_block_lines: Option<usize>,
+    pub min_score_percent: Option<usize>,
 }
 
 impl std::fmt::Debug for Config {
@@ -51,6 +56,9 @@ impl std::fmt::Debug for Config {
             .field("config_file", &self.config_file)
             .field("disable_reasoning", &self.disable_reasoning)
             .field("extra_body", &self.extra_body)
+            .field("mmr_lambda", &self.mmr_lambda)
+            .field("max_block_lines", &self.max_block_lines)
+            .field("min_score_percent", &self.min_score_percent)
             .finish()
     }
 }
@@ -76,6 +84,9 @@ struct StoredConfig {
     max_total_bytes: Option<usize>,
     disable_reasoning: Option<bool>,
     extra_body: Option<Value>,
+    mmr_lambda: Option<f64>,
+    max_block_lines: Option<usize>,
+    min_score_percent: Option<usize>,
 }
 
 pub fn load(model_override: Option<&str>) -> Result<Config> {
@@ -201,6 +212,19 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
     }
     let disable_reasoning = stored.disable_reasoning.unwrap_or(false);
     let extra_body = normalize_extra_body(stored.extra_body)?;
+    if let Some(lambda) = stored.mmr_lambda
+        && !(0.0..=1.0).contains(&lambda)
+    {
+        bail!("mmrLambda must be between 0.0 and 1.0");
+    }
+    if let Some(percent) = stored.min_score_percent
+        && percent > 100
+    {
+        bail!("minScorePercent must be between 0 and 100");
+    }
+    if stored.max_block_lines == Some(0) {
+        bail!("maxBlockLines must be a positive integer");
+    }
     Ok(Config {
         model,
         fallback_models,
@@ -215,6 +239,9 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
         config_file,
         disable_reasoning,
         extra_body,
+        mmr_lambda: stored.mmr_lambda,
+        max_block_lines: stored.max_block_lines,
+        min_score_percent: stored.min_score_percent,
     })
 }
 

@@ -170,6 +170,18 @@ struct RetrieveArgs {
     context_lines: usize,
     #[arg(long, default_value_t = 200)]
     max_hits: usize,
+    /// MMR relevance/diversity trade-off in [0,1]; higher favors relevance.
+    /// Overrides config `mmrLambda`; defaults to the built-in tuning.
+    #[arg(long = "mmr-lambda")]
+    mmr_lambda: Option<f64>,
+    /// Largest enclosing block a hit may expand into before falling back to the
+    /// fixed context window. Overrides config `maxBlockLines`.
+    #[arg(long = "max-block-lines")]
+    max_block_lines: Option<usize>,
+    /// Drop chunks scoring below this percent of the top hit. Overrides config
+    /// `minScorePercent`.
+    #[arg(long = "min-score-percent")]
+    min_score_percent: Option<usize>,
     /// Ripgrep glob applied to the search (repeatable). Prefix with `!` to
     /// exclude, e.g. `--glob '!public/**'` or `--glob 'src/**'`.
     #[arg(long = "glob")]
@@ -213,6 +225,9 @@ fn run() -> Result<()> {
                     .into_iter()
                     .map(|pattern| format!("!{pattern}")),
             );
+            use agent_shunt::application::retrieve::{
+                MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA,
+            };
             let input = RetrieveInput {
                 question: args.question,
                 cwd: args.cwd,
@@ -224,6 +239,17 @@ fn run() -> Result<()> {
                 scope: args
                     .diff
                     .map(|base| agent_shunt::application::retrieve::ChangeScope { base }),
+                // Precedence: explicit CLI flag, then config override, then the
+                // built-in default.
+                mmr_lambda: args.mmr_lambda.or(config.mmr_lambda).unwrap_or(MMR_LAMBDA),
+                max_block_lines: args
+                    .max_block_lines
+                    .or(config.max_block_lines)
+                    .unwrap_or(MAX_BLOCK_LINES),
+                min_score_percent: args
+                    .min_score_percent
+                    .or(config.min_score_percent)
+                    .unwrap_or(MIN_SCORE_PERCENT),
             };
             app.retrieve(input, args.analyze, &config)?
         }

@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use agent_shunt::{
     adapters::{filesystem::SecureFilesystem, git::GitChangeSource, ripgrep::RipgrepSearch},
-    application::retrieve::{RetrieveInput, execute},
+    application::retrieve::{
+        MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, execute,
+    },
     domain::Limits,
 };
 
@@ -62,6 +64,9 @@ fn representative_repository_queries_recover_expected_evidence() {
                 max_hits: 40,
                 globs,
                 scope: None,
+                mmr_lambda: MMR_LAMBDA,
+                max_block_lines: MAX_BLOCK_LINES,
+                min_score_percent: MIN_SCORE_PERCENT,
             },
         )
         .unwrap_or_else(|error| panic!("evaluation query failed: {question}: {error}"));

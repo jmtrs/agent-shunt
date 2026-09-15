@@ -163,7 +163,14 @@ impl CodeSearch for RipgrepSearch {
         let intrinsic = intrinsic_weights(&terms);
         let mut filename_raw = filename_hits(root, &forms, globs, 10_000)?;
         let mut hits: Vec<SearchHit> = Vec::new();
-        let raw_hit_limit = max_hits.saturating_mul(50).clamp(max_hits, 5_000);
+        // Cap on raw hits scored before ripgrep is killed. ripgrep emits in
+        // filesystem-traversal order, not by relevance, so a cap hit early
+        // silently drops everything traversed later — a recall bias on large
+        // trees. A high ceiling (still bounded, still guarded by SEARCH_TIMEOUT
+        // and `--max-count 20` per file) keeps that bias off the common case;
+        // an explicit `--glob`/`--diff` scope narrows traversal so it cannot
+        // truncate the requested files at all.
+        let raw_hit_limit = max_hits.saturating_mul(50).clamp(max_hits, 50_000);
         let pattern = forms
             .iter()
             .flatten()
@@ -442,7 +449,17 @@ fn query_terms(question: &str) -> Vec<String> {
     splitter
         .split(question)
         .map(|term| term.trim_matches(['.', ':', '/', '-']))
-        .filter(|term| term.chars().count() >= 3)
+        // Keep three-plus-char terms, and two-char terms that are clearly
+        // identifiers rather than filler: an all-caps initialism (`IO`, `DB`,
+        // `UI`) or one carrying a digit (`S3`, `v2`). Generic two-letter words
+        // (`is`, `of`, `to`) stay dropped.
+        .filter(|term| {
+            let count = term.chars().count();
+            count >= 3
+                || (count == 2
+                    && (term.chars().all(|character| character.is_ascii_uppercase())
+                        || term.chars().any(|character| character.is_ascii_digit())))
+        })
         .filter(|term| !stop.contains(term.to_lowercase().as_str()))
         .filter(|term| seen.insert(term.to_lowercase()))
         .take(12)
@@ -555,7 +572,16 @@ fn stem(term: &str) -> String {
     let lower = term.to_lowercase();
     if lower.len() > 4 && lower.ends_with("es") {
         lower[..lower.len() - 2].to_owned()
-    } else if lower.len() > 3 && lower.ends_with('s') && !lower.ends_with("ss") {
+    } else if lower.len() > 3
+        && lower.ends_with('s')
+        // Latinate singulars end in a consonant + `s` that is not a plural
+        // marker: `status`, `focus`, `bonus`, `axis`, `basis`, `analysis`.
+        // Stripping it would coin `statu`, whose open-tailed matcher then
+        // catches `statute`/`statutory`. Leave `-ss`/`-us`/`-is` intact.
+        && !lower.ends_with("ss")
+        && !lower.ends_with("us")
+        && !lower.ends_with("is")
+    {
         lower[..lower.len() - 1].to_owned()
     } else {
         lower
@@ -651,6 +677,25 @@ mod tests {
             RipgrepSearch.terms("Dónde está authentication validation?"),
             ["authentication", "validation"]
         );
+    }
+
+    #[test]
+    fn keeps_short_identifier_terms_but_drops_generic_two_letter_words() {
+        use super::query_terms;
+        // `IO` (all-caps), `S3` and `v2` (carry a digit) are identifiers worth
+        // searching for; `db`/`is`/`of` are lowercase filler and stay dropped.
+        assert_eq!(query_terms("IO db S3 v2 is of"), ["IO", "S3", "v2"]);
+    }
+
+    #[test]
+    fn stem_leaves_latinate_singulars_intact() {
+        use super::stem;
+        assert_eq!(stem("paths"), "path");
+        assert_eq!(stem("classes"), "class");
+        // Not plurals: stripping the trailing `s` would coin a false stem.
+        assert_eq!(stem("status"), "status");
+        assert_eq!(stem("focus"), "focus");
+        assert_eq!(stem("basis"), "basis");
     }
 
     #[test]
