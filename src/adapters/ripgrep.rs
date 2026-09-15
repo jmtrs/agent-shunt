@@ -86,6 +86,14 @@ const BINARY_EXTENSIONS: &[&str] = &[
 /// that happens to mention several common ones.
 const IDF_SCALE: f64 = 4.0;
 
+/// The file-coverage bonus credits a file's single strongest (rarest) matched
+/// term in full, and the rest only at this fraction. Without the discount a
+/// tangential file that mentions many *generic* query terms (`how`, `are`,
+/// `resolved`) out-covers the real subject file that holds the one *rare*,
+/// discriminating term (`precedence`) — the measured cause of an off-target
+/// file flooding a localized question.
+const COVERAGE_TAIL_DIVISOR: usize = 3;
+
 /// A file whose *name* matches a query term is a strong locator ("metrics" ->
 /// metrics.rs), so a filename match is worth several content occurrences of the
 /// same term, weighted by the term's rarity (IDF). Generic tokens weigh little,
@@ -281,7 +289,7 @@ impl CodeSearch for RipgrepSearch {
             let file_weight = coverage
                 .get(hit.path.as_str())
                 .copied()
-                .map(|mask| weight_of(mask, &term_weight))
+                .map(|mask| coverage_weight(mask, &term_weight))
                 .unwrap_or_default();
             let name_boost = filename_boost.get(hit.path.as_str()).copied().unwrap_or(0);
             // Reward the matching line, a smaller bonus for how much of the whole
@@ -564,6 +572,21 @@ fn weight_of(mask: u16, term_weight: &[usize]) -> usize {
         .sum()
 }
 
+/// File-coverage bonus with diminishing returns: the file's single strongest
+/// (rarest) matched term at full weight, plus the remaining matched terms at
+/// [`COVERAGE_TAIL_DIVISOR`]. Unlike a flat sum, breadth of generic terms
+/// cannot stand in for the rare discriminating term a file is missing.
+fn coverage_weight(mask: u16, term_weight: &[usize]) -> usize {
+    let mut weights = set_bits(mask)
+        .filter_map(|index| term_weight.get(index).copied())
+        .collect::<Vec<_>>();
+    weights.sort_unstable_by(|left, right| right.cmp(left));
+    match weights.split_first() {
+        Some((first, rest)) => first + rest.iter().sum::<usize>() / COVERAGE_TAIL_DIVISOR,
+        None => 0,
+    }
+}
+
 /// Filename-match boost: the matched terms' IDF weight scaled by [`FILENAME_BOOST`].
 fn filename_boost_of(mask: u16, term_weight: &[usize]) -> usize {
     weight_of(mask, term_weight) * FILENAME_BOOST
@@ -603,6 +626,24 @@ mod tests {
     use crate::application::ports::CodeSearch;
 
     use super::RipgrepSearch;
+
+    #[test]
+    fn coverage_weight_favors_the_rare_term_over_breadth_of_generic_ones() {
+        use super::coverage_weight;
+        // term_weight: index 0 is a rare/discriminating term (weight 20),
+        // indices 1..=3 are generic (weight 3 each).
+        let term_weight = [20usize, 3, 3, 3];
+        // File R covers only the rare term; file G covers the three generic ones.
+        let rare_only = coverage_weight(0b0001, &term_weight);
+        let generic_breadth = coverage_weight(0b1110, &term_weight);
+        // Under a flat sum, breadth (9) would beat the rare term (20 already wins
+        // here, but the point is the discounted tail keeps it decisive): the file
+        // holding the rare term must outrank the one merely covering many generic
+        // terms.
+        assert!(rare_only > generic_breadth);
+        // The discount applies to the tail: rare + three generic = 20 + (3+3+3)/3.
+        assert_eq!(coverage_weight(0b1111, &term_weight), 20 + (3 + 3 + 3) / 3);
+    }
 
     #[test]
     fn removes_common_query_words() {

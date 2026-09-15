@@ -61,6 +61,79 @@ impl Document {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// Expands a hit to its enclosing indentation block: the nearest earlier
+    /// non-blank line at a strictly smaller indent (the definition header),
+    /// down through every line more indented than that header. Works on brace
+    /// and indent styles alike, with no language grammar. Returns `None` when
+    /// no smaller-indent header exists (a top-level statement) or the block
+    /// would exceed `max_span` lines, so the caller keeps its fixed window
+    /// instead of swallowing a whole impl or file.
+    pub fn enclosing_block(&self, line: usize, max_span: usize) -> Option<LineRange> {
+        let indent = |text: &str| -> Option<usize> {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.len() - text.trim_start().len())
+            }
+        };
+        let index = line.checked_sub(1)?;
+        let hit_indent = indent(self.lines.get(index)?)?;
+        // Header: nearest earlier non-blank line indented less than the hit.
+        let mut cursor = index;
+        let header = loop {
+            if cursor == 0 {
+                return None;
+            }
+            cursor -= 1;
+            if let Some(current) = indent(&self.lines[cursor])
+                && current < hit_indent
+            {
+                break (cursor, current);
+            }
+        };
+        let (start, header_indent) = header;
+        // Body: extend down while lines stay more indented than the header,
+        // spanning blank lines but stopping at the first line that returns to
+        // the header's level or below (the closing brace or the next sibling).
+        let mut end = index;
+        let mut cursor = index;
+        while cursor + 1 < self.lines.len() {
+            cursor += 1;
+            match indent(&self.lines[cursor]) {
+                Some(current) if current > header_indent => end = cursor,
+                Some(_) => break,
+                None => {}
+            }
+        }
+        let range = LineRange {
+            start_line: start + 1,
+            end_line: end + 1,
+        };
+        (range.end_line - range.start_line + 1 <= max_span).then_some(range)
+    }
+
+    /// Trims blank and delimiter-only lines (`{`, `}`, `;`, ...) from a range's
+    /// edges — the padding a fixed window drags in — never emptying it: at
+    /// least one line always survives.
+    pub fn trim_trivial(&self, range: LineRange) -> LineRange {
+        let is_trivial = |line: &str| {
+            let trimmed = line.trim();
+            trimmed.is_empty() || trimmed.chars().all(|character| "{}()[];,".contains(character))
+        };
+        let mut start = range.start_line;
+        let mut end = range.end_line;
+        while start < end && is_trivial(&self.lines[start - 1]) {
+            start += 1;
+        }
+        while end > start && is_trivial(&self.lines[end - 1]) {
+            end -= 1;
+        }
+        LineRange {
+            start_line: start,
+            end_line: end,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -268,4 +341,72 @@ pub struct InstallReport {
     pub hook_changed: bool,
     pub hook_backup: Option<PathBuf>,
     pub requires_hook_trust: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Document, LineRange};
+
+    fn document(source: &str) -> Document {
+        let lines = source.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+        let line_count = lines.len();
+        Document {
+            path: "x.rs".to_owned(),
+            bytes: source.len(),
+            line_count,
+            lines,
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn enclosing_block_snaps_hit_to_its_function_body() {
+        // fn header at indent 0, body at indent 4, closing brace back at 0.
+        let doc = document("fn outer() {\n    let a = 1;\n    let b = 2;\n    call(a, b);\n}\nfn other() {}\n");
+        // Hit on `call(a, b);` (line 4) expands to the fn header..last body line,
+        // never crossing into `other`.
+        let range = doc.enclosing_block(4, 48).unwrap();
+        assert_eq!(range, LineRange { start_line: 1, end_line: 4 });
+    }
+
+    #[test]
+    fn enclosing_block_collapses_two_hits_in_one_function_to_the_same_range() {
+        let doc = document("fn outer() {\n    let a = 1;\n    let b = 2;\n    call(a, b);\n}\n");
+        assert_eq!(doc.enclosing_block(2, 48), doc.enclosing_block(4, 48));
+    }
+
+    #[test]
+    fn enclosing_block_bails_on_top_level_hit() {
+        // A hit on a line with no less-indented ancestor keeps the fixed window.
+        let doc = document("use crate::foo;\nuse crate::bar;\n");
+        assert_eq!(doc.enclosing_block(1, 48), None);
+    }
+
+    #[test]
+    fn enclosing_block_bails_when_block_exceeds_max_span() {
+        let mut source = String::from("fn big() {\n");
+        for index in 0..60 {
+            source.push_str(&format!("    let v{index} = {index};\n"));
+        }
+        source.push_str("}\n");
+        let doc = document(&source);
+        assert_eq!(doc.enclosing_block(30, 48), None);
+    }
+
+    #[test]
+    fn trim_trivial_strips_blank_and_delimiter_edges() {
+        let doc = document("{\n\n    real();\n}\n");
+        assert_eq!(
+            doc.trim_trivial(LineRange { start_line: 1, end_line: 4 }),
+            LineRange { start_line: 3, end_line: 3 }
+        );
+    }
+
+    #[test]
+    fn trim_trivial_never_empties_an_all_trivial_range() {
+        let doc = document("{\n}\n");
+        let trimmed = doc.trim_trivial(LineRange { start_line: 1, end_line: 2 });
+        assert_eq!(trimmed.start_line, trimmed.end_line);
+    }
 }

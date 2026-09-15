@@ -38,6 +38,19 @@ const MAX_DIFF_TERM_TEXT: usize = 100_000;
 /// other hits from the same files by this factor.
 const SCOPE_HUNK_BOOST: usize = 3;
 
+/// Largest enclosing block a hit may expand into. Beyond this the block is a
+/// whole impl/class/file, not a focused unit, so the hit keeps its fixed
+/// context window instead. Sized to a generous function body: big enough to
+/// collapse a scatter of same-function windows into one chunk, bounded enough
+/// that one hit never swallows the budget.
+const MAX_BLOCK_LINES: usize = 48;
+
+/// Most chunks any single file may contribute to the result. Generous enough
+/// that a genuinely file-localized question still gets deep coverage, tight
+/// enough that one term-heavy file cannot flood the budget with a scatter of
+/// weakly-relevant hits and starve the other evidence.
+const MAX_CHUNKS_PER_FILE: usize = 6;
+
 /// Chunks scoring below this percentage of the top hit are dropped before
 /// selection. The ranked tail of a broad question is weakly related — dozens
 /// of files can match faintly — and would otherwise fill the whole token
@@ -200,13 +213,17 @@ pub fn execute(
         let mut ranges = grouped[&path]
             .iter()
             .map(|(line, score)| {
-                (
-                    LineRange {
+                // Snap each hit to its enclosing block so several hits in one
+                // function collapse to a single chunk instead of a scatter of
+                // overlapping fixed windows; fall back to the fixed window for
+                // top-level statements or blocks too large to be worth it.
+                let range = document
+                    .enclosing_block(*line, MAX_BLOCK_LINES)
+                    .unwrap_or(LineRange {
                         start_line: line.saturating_sub(input.context_lines).max(1),
                         end_line: (*line + input.context_lines).min(document.line_count),
-                    },
-                    *score,
-                )
+                    });
+                (document.trim_trivial(range), *score)
             })
             .collect::<Vec<_>>();
         ranges.sort_by_key(|(range, _)| range.start_line);
@@ -284,12 +301,24 @@ pub fn execute(
         }
     }
     diverse.extend(deferred);
+    // Per-file depth cap: past its first (diversity-guaranteed) slot, one file
+    // may contribute at most this many chunks. A file that merely *uses* a
+    // heavily-repeated query term (`credential` scattered across a consumer
+    // module) otherwise takes a dozen slots of budget away from the file that
+    // actually answers the question, even when the budget is not exhausted.
+    // The cap frees that budget; omitted chunks still mark the result truncated.
     let mut selected = Vec::new();
     let mut total_tokens = 0;
+    let mut per_file: BTreeMap<String, usize> = BTreeMap::new();
     for candidate in diverse {
+        let count = per_file.entry(candidate.path.clone()).or_default();
+        if *count >= MAX_CHUNKS_PER_FILE {
+            continue;
+        }
         if total_tokens + candidate.estimated_tokens > input.budget_tokens {
             continue;
         }
+        *count += 1;
         total_tokens += candidate.estimated_tokens;
         selected.push(candidate);
         if total_tokens >= input.budget_tokens {
@@ -495,6 +524,70 @@ mod tests {
             globs: Vec::new(),
             scope: None,
         }
+    }
+
+    struct FloodSearch;
+    impl CodeSearch for FloodSearch {
+        fn terms(&self, _: &str) -> Vec<String> {
+            vec!["needle".to_owned()]
+        }
+        fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
+            // Eight well-separated hits in one file, so each snaps to its own
+            // chunk (no merging) and the per-file cap is what limits selection.
+            Ok((0..8)
+                .map(|index| SearchHit {
+                    path: "src/flood.rs".to_owned(),
+                    line: index * 4 + 2,
+                    score: 5,
+                    matched_terms: 1,
+                })
+                .collect())
+        }
+        fn available(&self) -> bool {
+            true
+        }
+    }
+
+    struct FloodLoader;
+    impl DocumentLoader for FloodLoader {
+        fn load(&self, _: &Path, _: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
+            // 32 top-level lines, each a standalone `needle` statement, so hits
+            // never share an enclosing block or merge.
+            let lines = (0..32)
+                .map(|index| format!("let needle{index} = {index};"))
+                .collect::<Vec<_>>();
+            Ok(LoadedDocuments {
+                total_bytes: 256,
+                documents: vec![Document {
+                    path: "src/flood.rs".to_owned(),
+                    bytes: 256,
+                    line_count: lines.len(),
+                    numbered_content: String::new(),
+                    lines,
+                    allowed_ranges: Vec::new(),
+                }],
+            })
+        }
+    }
+
+    #[test]
+    fn one_file_cannot_exceed_the_per_file_chunk_cap() {
+        let ample = RetrieveInput {
+            budget_tokens: 10_000,
+            context_lines: 0,
+            ..input()
+        };
+        let (result, _) =
+            execute(&FloodSearch, &Changes(Vec::new()), &FloodLoader, &ample).unwrap();
+        let from_flood = result
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.path == "src/flood.rs")
+            .count();
+        assert_eq!(from_flood, super::MAX_CHUNKS_PER_FILE);
+        // Budget had ample room, so the omission is due to the cap and the
+        // result is honestly marked truncated.
+        assert!(result.truncated);
     }
 
     #[test]
