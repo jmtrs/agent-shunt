@@ -110,7 +110,7 @@ impl Document {
             start_line: start + 1,
             end_line: end + 1,
         };
-        (range.end_line - range.start_line + 1 <= max_span).then_some(range)
+        (range.end_line - range.start_line < max_span).then_some(range)
     }
 
     /// Trims blank and delimiter-only lines (`{`, `}`, `;`, ...) from a range's
@@ -119,7 +119,10 @@ impl Document {
     pub fn trim_trivial(&self, range: LineRange) -> LineRange {
         let is_trivial = |line: &str| {
             let trimmed = line.trim();
-            trimmed.is_empty() || trimmed.chars().all(|character| "{}()[];,".contains(character))
+            trimmed.is_empty()
+                || trimmed
+                    .chars()
+                    .all(|character| "{}()[];,".contains(character))
         };
         let mut start = range.start_line;
         let mut end = range.end_line;
@@ -363,11 +366,19 @@ mod tests {
     #[test]
     fn enclosing_block_snaps_hit_to_its_function_body() {
         // fn header at indent 0, body at indent 4, closing brace back at 0.
-        let doc = document("fn outer() {\n    let a = 1;\n    let b = 2;\n    call(a, b);\n}\nfn other() {}\n");
+        let doc = document(
+            "fn outer() {\n    let a = 1;\n    let b = 2;\n    call(a, b);\n}\nfn other() {}\n",
+        );
         // Hit on `call(a, b);` (line 4) expands to the fn header..last body line,
         // never crossing into `other`.
         let range = doc.enclosing_block(4, 48).unwrap();
-        assert_eq!(range, LineRange { start_line: 1, end_line: 4 });
+        assert_eq!(
+            range,
+            LineRange {
+                start_line: 1,
+                end_line: 4
+            }
+        );
     }
 
     #[test]
@@ -398,15 +409,24 @@ mod tests {
     fn trim_trivial_strips_blank_and_delimiter_edges() {
         let doc = document("{\n\n    real();\n}\n");
         assert_eq!(
-            doc.trim_trivial(LineRange { start_line: 1, end_line: 4 }),
-            LineRange { start_line: 3, end_line: 3 }
+            doc.trim_trivial(LineRange {
+                start_line: 1,
+                end_line: 4
+            }),
+            LineRange {
+                start_line: 3,
+                end_line: 3
+            }
         );
     }
 
     #[test]
     fn trim_trivial_never_empties_an_all_trivial_range() {
         let doc = document("{\n}\n");
-        let trimmed = doc.trim_trivial(LineRange { start_line: 1, end_line: 2 });
+        let trimmed = doc.trim_trivial(LineRange {
+            start_line: 1,
+            end_line: 2,
+        });
         assert_eq!(trimmed.start_line, trimmed.end_line);
     }
 }

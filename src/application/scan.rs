@@ -648,7 +648,10 @@ mod tests {
     }
     impl ContextWorker for TimeoutRecordingWorker {
         fn analyze(&self, request: &WorkerRequest, _: &str) -> Result<WorkerResponse> {
-            self.timeouts.lock().unwrap().push(request.limits.timeout_ms);
+            self.timeouts
+                .lock()
+                .unwrap()
+                .push(request.limits.timeout_ms);
             anyhow::bail!("boom")
         }
     }

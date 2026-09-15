@@ -819,8 +819,13 @@ mod tests {
         // A README matches the same term but must not lead a code question; the
         // path also sorts before src/ on ties, so only the penalty can reorder.
         fs::write(root.path().join("README.md"), "The marker section.\n").unwrap();
-        let hits = RipgrepSearch.search(root.path(), "marker", 10, &[]).unwrap();
-        assert_eq!(hits.first().map(|hit| hit.path.as_str()), Some("src/handler.rs"));
+        let hits = RipgrepSearch
+            .search(root.path(), "marker", 10, &[])
+            .unwrap();
+        assert_eq!(
+            hits.first().map(|hit| hit.path.as_str()),
+            Some("src/handler.rs")
+        );
         // Down-weighted, not excluded: the doc still appears.
         assert!(hits.iter().any(|hit| hit.path == "README.md"));
     }

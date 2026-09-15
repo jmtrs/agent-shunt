@@ -51,6 +51,17 @@ const MAX_BLOCK_LINES: usize = 48;
 /// weakly-relevant hits and starve the other evidence.
 const MAX_CHUNKS_PER_FILE: usize = 6;
 
+/// MMR relevance/diversity trade-off. At 0.7 relevance leads, but a redundant
+/// chunk is still pushed down the order enough to lose its slot to fresh
+/// evidence under a tight budget.
+const MMR_LAMBDA: f64 = 0.7;
+
+/// Floor similarity between two chunks of the same file, regardless of content
+/// overlap. Reproduces the one-per-path-first spread: another chunk of an
+/// already-chosen file is treated as partly redundant, so a not-yet-seen file
+/// of comparable relevance is preferred first.
+const SAME_PATH_SIM: f64 = 0.5;
+
 /// Chunks scoring below this percentage of the top hit are dropped before
 /// selection. The ranked tail of a broad question is weakly related — dozens
 /// of files can match faintly — and would otherwise fill the whole token
@@ -178,13 +189,15 @@ pub fn execute(
     // read instead of a faint shoulder of padding. An even spread (a genuinely
     // broad question) has no such step and is left intact.
     let top = ranked_files.first().map(|file| file.1).unwrap_or(0);
-    if top > 0 {
-        if let Some(cliff) = (1..ranked_files.len()).find(|&index| {
-            let drop = ranked_files[index - 1].1.saturating_sub(ranked_files[index].1);
+    if top > 0
+        && let Some(cliff) = (1..ranked_files.len()).find(|&index| {
+            let drop = ranked_files[index - 1]
+                .1
+                .saturating_sub(ranked_files[index].1);
             drop.saturating_mul(100) > CLIFF_GAP_PERCENT.saturating_mul(top)
-        }) {
-            ranked_files.truncate(cliff.max(MIN_CLIFF_FILES));
-        }
+        })
+    {
+        ranked_files.truncate(cliff.max(MIN_CLIFF_FILES));
     }
     ranked_files.truncate(input.limits.max_files);
     let paths = ranked_files
@@ -284,23 +297,43 @@ pub fn execute(
         });
     }
 
-    // Diversity: each file gets one slot before any file repeats, so several
-    // sources are represented instead of the budget draining into one file.
-    // Extra chunks follow in score order, so a file with more strong hits still
-    // gets depth once every file has been seen. This one-per-path-first pass is
-    // the recall guarantee — a faintly-ranked but expected file keeps a slot
-    // rather than being starved by repeated hits from a term-heavy neighbour.
-    let mut diverse = Vec::with_capacity(candidates.len());
-    let mut deferred = Vec::new();
-    let mut represented = std::collections::HashSet::new();
-    for candidate in candidates {
-        if represented.insert(candidate.path.clone()) {
-            diverse.push(candidate);
-        } else {
-            deferred.push(candidate);
+    // Maximal Marginal Relevance ordering: greedily take the chunk that best
+    // trades relevance against redundancy with what is already chosen, so a
+    // second near-identical chunk (boilerplate duplicated across files, or
+    // another hit in an already-represented file) yields its slot to fresh
+    // evidence. Same-path pairs carry a floor similarity, which reproduces the
+    // previous one-per-path-first recall spread — a faintly-ranked expected file
+    // still leads its neighbour's repeats — without a separate pass.
+    let token_sets = candidates
+        .iter()
+        .map(|candidate| content_tokens(&candidate.content))
+        .collect::<Vec<_>>();
+    let max_score_f = max_score.max(1) as f64;
+    let mut remaining = (0..candidates.len()).collect::<Vec<_>>();
+    let mut order = Vec::with_capacity(candidates.len());
+    while !remaining.is_empty() {
+        let mut best_position = 0;
+        let mut best_value = f64::NEG_INFINITY;
+        for (position, &candidate) in remaining.iter().enumerate() {
+            let relevance = candidates[candidate].score as f64 / max_score_f;
+            let redundancy = order
+                .iter()
+                .map(|&chosen| similarity(candidate, chosen, &candidates, &token_sets))
+                .fold(0.0_f64, f64::max);
+            let value = MMR_LAMBDA * relevance - (1.0 - MMR_LAMBDA) * redundancy;
+            // Strict improvement keeps the earliest (higher-scoring, path-sorted)
+            // candidate on ties, so ordering stays deterministic.
+            if value > best_value + f64::EPSILON {
+                best_value = value;
+                best_position = position;
+            }
         }
+        order.push(remaining.remove(best_position));
     }
-    diverse.extend(deferred);
+    let diverse = order
+        .into_iter()
+        .map(|index| candidates[index].clone())
+        .collect::<Vec<_>>();
     // Per-file depth cap: past its first (diversity-guaranteed) slot, one file
     // may contribute at most this many chunks. A file that merely *uses* a
     // heavily-repeated query term (`credential` scattered across a consumer
@@ -408,6 +441,52 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
 /// undercounting by the envelope.
 fn delivered_tokens(content: &str, path: &str) -> usize {
     (content.len() + path.len()).div_ceil(4) + ENVELOPE_TOKENS_PER_CHUNK
+}
+
+/// Lowercased identifier-ish tokens of a chunk's content, for redundancy
+/// comparison. The line-number prefixes and short tokens are dropped so two
+/// chunks are judged similar by the identifiers they share, not their line
+/// numbering or punctuation.
+fn content_tokens(content: &str) -> std::collections::HashSet<String> {
+    content
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|token| token.len() >= 3 && !token.chars().all(|character| character.is_numeric()))
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Jaccard overlap of two token sets, in `[0, 1]`.
+fn jaccard(
+    left: &std::collections::HashSet<String>,
+    right: &std::collections::HashSet<String>,
+) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 0.0;
+    }
+    let intersection = left.intersection(right).count();
+    let union = left.len() + right.len() - intersection;
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Redundancy between two candidate chunks: content overlap, raised to a floor
+/// for two chunks of the same file so per-file depth is treated as partly
+/// redundant (the recall spread).
+fn similarity(
+    left: usize,
+    right: usize,
+    candidates: &[RetrievedChunk],
+    token_sets: &[std::collections::HashSet<String>],
+) -> f64 {
+    let overlap = jaccard(&token_sets[left], &token_sets[right]);
+    if candidates[left].path == candidates[right].path {
+        overlap.max(SAME_PATH_SIM)
+    } else {
+        overlap
+    }
 }
 
 /// A hit counts as inside the change when the file is wholly new (`whole_file`,
@@ -568,6 +647,94 @@ mod tests {
                 }],
             })
         }
+    }
+
+    struct DupSearch;
+    impl CodeSearch for DupSearch {
+        fn terms(&self, _: &str) -> Vec<String> {
+            vec!["needle".to_owned()]
+        }
+        fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
+            // Three files, one hit each; b.rs is a near-duplicate of the
+            // top-scoring a.rs, c.rs is distinct and scores lowest.
+            Ok(vec![
+                SearchHit {
+                    path: "a.rs".to_owned(),
+                    line: 1,
+                    score: 10,
+                    matched_terms: 1,
+                },
+                SearchHit {
+                    path: "b.rs".to_owned(),
+                    line: 1,
+                    score: 9,
+                    matched_terms: 1,
+                },
+                SearchHit {
+                    path: "c.rs".to_owned(),
+                    line: 1,
+                    score: 8,
+                    matched_terms: 1,
+                },
+            ])
+        }
+        fn available(&self) -> bool {
+            true
+        }
+    }
+
+    struct DupLoader;
+    impl DocumentLoader for DupLoader {
+        fn load(&self, _: &Path, paths: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
+            let content = |path: &str| match path {
+                // a.rs and b.rs share every identifier (jaccard 1); c.rs shares none.
+                "c.rs" => "needle foxtrot golf hotel india juliet",
+                _ => "needle alpha bravo charlie delta echo",
+            };
+            let documents = paths
+                .iter()
+                .map(|path| {
+                    let name = path.to_string_lossy().into_owned();
+                    let line = content(&name).to_owned();
+                    Document {
+                        path: name,
+                        bytes: line.len(),
+                        line_count: 1,
+                        numbered_content: String::new(),
+                        lines: vec![line],
+                        allowed_ranges: Vec::new(),
+                    }
+                })
+                .collect();
+            Ok(LoadedDocuments {
+                documents,
+                total_bytes: 200,
+            })
+        }
+    }
+
+    #[test]
+    fn mmr_prefers_a_distinct_chunk_over_a_higher_scoring_near_duplicate() {
+        // Budget fits exactly two chunks. Score order would take a.rs then its
+        // near-duplicate b.rs; MMR takes a.rs then the distinct c.rs instead.
+        let tight = RetrieveInput {
+            budget_tokens: 108,
+            context_lines: 0,
+            ..input()
+        };
+        let (result, _) = execute(&DupSearch, &Changes(Vec::new()), &DupLoader, &tight).unwrap();
+        let paths = result
+            .chunks
+            .iter()
+            .map(|chunk| chunk.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"a.rs"));
+        assert!(
+            paths.contains(&"c.rs"),
+            "MMR kept the near-duplicate: {paths:?}"
+        );
+        assert!(!paths.contains(&"b.rs"));
     }
 
     #[test]
@@ -785,7 +952,11 @@ mod tests {
         // The faint file is floored out; the three stronger files survive.
         assert!(!paths.contains(&"src/faint.rs"));
         assert!(paths.contains(&"src/top.rs"));
-        assert!(documents.iter().all(|document| document.path != "src/faint.rs"));
+        assert!(
+            documents
+                .iter()
+                .all(|document| document.path != "src/faint.rs")
+        );
         // Evidence was omitted (the faint file was ranked, then floored).
         assert!(result.truncated);
     }
