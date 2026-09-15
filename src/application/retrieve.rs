@@ -38,6 +38,12 @@ const MAX_DIFF_TERM_TEXT: usize = 100_000;
 /// other hits from the same files by this factor.
 const SCOPE_HUNK_BOOST: usize = 3;
 
+/// Chunks scoring below this percentage of the top hit are dropped before
+/// selection. The ranked tail of a broad question is weakly related — dozens
+/// of files can match faintly — and would otherwise fill the whole token
+/// budget with noise that never answers the question.
+const MIN_SCORE_PERCENT: usize = 15;
+
 /// Executes bounded retrieval under a strict evidence token budget: any
 /// retrieved chunk that does not fit the budget is skipped entirely, never
 /// truncated, so selected evidence is always complete source context.
@@ -208,6 +214,26 @@ pub fn execute(
     });
 
     let available_count = candidates.len();
+    // Relevance floor: drop the ranked tail whose score is a small fraction of
+    // the top hit before anything is selected, so weakly-related files never
+    // consume the token budget. `available_count` is captured above, so any
+    // floored chunk still marks the result truncated (evidence was omitted).
+    let max_score = candidates
+        .first()
+        .map(|candidate| candidate.score)
+        .unwrap_or(0);
+    if max_score > 0 {
+        candidates.retain(|candidate| {
+            candidate.score.saturating_mul(100) >= max_score.saturating_mul(MIN_SCORE_PERCENT)
+        });
+    }
+
+    // Diversity: each file gets one slot before any file repeats, so several
+    // sources are represented instead of the budget draining into one file.
+    // Extra chunks follow in score order, so a file with more strong hits still
+    // gets depth once every file has been seen. This one-per-path-first pass is
+    // the recall guarantee — a faintly-ranked but expected file keeps a slot
+    // rather than being starved by repeated hits from a term-heavy neighbour.
     let mut diverse = Vec::with_capacity(candidates.len());
     let mut deferred = Vec::new();
     let mut represented = std::collections::HashSet::new();
@@ -535,5 +561,72 @@ mod tests {
         });
         let error = execute(&Search::new(), &Changes(Vec::new()), &Loader, &scoped).unwrap_err();
         assert!(error.to_string().contains("no local changes"));
+    }
+
+    /// A faintly-matching file must not survive next to a strong hit: the
+    /// relevance floor drops it before selection, yet the result stays marked
+    /// truncated because evidence was omitted.
+    #[test]
+    fn relevance_floor_drops_weak_tail_and_marks_truncated() {
+        struct TwoFileSearch;
+        impl CodeSearch for TwoFileSearch {
+            fn terms(&self, _: &str) -> Vec<String> {
+                vec!["needle".to_owned()]
+            }
+            fn search(
+                &self,
+                _: &Path,
+                _: &str,
+                _: usize,
+                _: &[String],
+            ) -> Result<Vec<SearchHit>> {
+                Ok(vec![
+                    SearchHit {
+                        path: "src/strong.rs".to_owned(),
+                        line: 2,
+                        score: 100,
+                        matched_terms: 1,
+                    },
+                    SearchHit {
+                        path: "src/weak.rs".to_owned(),
+                        line: 2,
+                        score: 5,
+                        matched_terms: 1,
+                    },
+                ])
+            }
+            fn available(&self) -> bool {
+                true
+            }
+        }
+
+        struct TwoFileLoader;
+        impl DocumentLoader for TwoFileLoader {
+            fn load(&self, _: &Path, _: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
+                let lines = ["a", "needle", "c", "d"].map(str::to_owned).to_vec();
+                let doc = |path: &str| Document {
+                    path: path.to_owned(),
+                    bytes: 20,
+                    line_count: lines.len(),
+                    numbered_content: String::new(),
+                    lines: lines.clone(),
+                    allowed_ranges: vec![LineRange {
+                        start_line: 1,
+                        end_line: 4,
+                    }],
+                };
+                Ok(LoadedDocuments {
+                    total_bytes: 40,
+                    documents: vec![doc("src/strong.rs"), doc("src/weak.rs")],
+                })
+            }
+        }
+
+        let (result, documents) =
+            execute(&TwoFileSearch, &Changes(Vec::new()), &TwoFileLoader, &input()).unwrap();
+        assert!(result.chunks.iter().all(|chunk| chunk.path == "src/strong.rs"));
+        assert!(documents.iter().all(|document| document.path == "src/strong.rs"));
+        // The weak file was ranked but floored out, so the result is truncated.
+        assert!(result.truncated);
     }
 }
