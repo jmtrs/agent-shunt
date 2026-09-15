@@ -20,6 +20,14 @@ use crate::{
     domain::{MetricRecord, Usage},
 };
 
+/// The structure resolver wired into retrieval: the AST-backed resolver when
+/// the `ast` feature is on, the dependency-free heuristic otherwise. Both
+/// implement [`crate::application::ports::StructureResolver`].
+#[cfg(feature = "ast")]
+type BlockResolver = crate::adapters::tree_sitter_chunker::AstResolver;
+#[cfg(not(feature = "ast"))]
+type BlockResolver = crate::application::resolver::HeuristicResolver;
+
 /// Repo-level instruction host selected on the `install` subcommand.
 pub enum RepoHost {
     AgentsMd,
@@ -33,6 +41,7 @@ pub struct Application {
     filesystem: SecureFilesystem,
     search: RipgrepSearch,
     changes: GitChangeSource,
+    resolver: BlockResolver,
     metrics: JsonlMetrics,
     codex_installer: CodexInstaller,
     claude_installer: ClaudeInstaller,
@@ -64,6 +73,7 @@ impl Default for Application {
             filesystem: SecureFilesystem,
             search: RipgrepSearch,
             changes: GitChangeSource,
+            resolver: BlockResolver::default(),
             metrics: JsonlMetrics::new(JsonlMetrics::default_path()),
             codex_installer: CodexInstaller::new(default_executable()),
             claude_installer: ClaudeInstaller::new(default_executable()),
@@ -141,6 +151,7 @@ impl Application {
                 &self.search,
                 &self.changes,
                 &self.filesystem,
+                &self.resolver,
                 &credentials,
                 &worker,
                 &input,
@@ -162,25 +173,30 @@ impl Application {
                 })
             })
         } else {
-            retrieve::execute(&self.search, &self.changes, &self.filesystem, &input).and_then(
-                |(retrieval_result, documents)| {
-                    let input_bytes = documents.iter().map(|document| document.bytes).sum();
-                    let files = documents.len();
-                    // Savings = the whole loaded files versus the tokens returned.
-                    let baseline_bytes = retrieval_result.baseline_bytes;
-                    let delivered_tokens = retrieval_result.estimated_tokens;
-                    Ok(RecordedResult {
-                        value: serde_json::to_value(retrieval_result)?,
-                        input_bytes,
-                        files,
-                        usage: None,
-                        model: None,
-                        fallback: false,
-                        baseline_bytes,
-                        delivered_tokens,
-                    })
-                },
+            retrieve::execute_with_resolver(
+                &self.search,
+                &self.changes,
+                &self.filesystem,
+                &self.resolver,
+                &input,
             )
+            .and_then(|(retrieval_result, documents)| {
+                let input_bytes = documents.iter().map(|document| document.bytes).sum();
+                let files = documents.len();
+                // Savings = the whole loaded files versus the tokens returned.
+                let baseline_bytes = retrieval_result.baseline_bytes;
+                let delivered_tokens = retrieval_result.estimated_tokens;
+                Ok(RecordedResult {
+                    value: serde_json::to_value(retrieval_result)?,
+                    input_bytes,
+                    files,
+                    usage: None,
+                    model: None,
+                    fallback: false,
+                    baseline_bytes,
+                    delivered_tokens,
+                })
+            })
         };
         self.record_result(
             "retrieve",

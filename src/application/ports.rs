@@ -3,9 +3,25 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    FileChange, InstallReport, Limits, LoadedDocuments, MetricRecord, SearchHit, WorkerRequest,
-    WorkerResponse,
+    FileChange, InstallReport, Limits, LineRange, LoadedDocuments, MetricRecord, SearchHit,
+    WorkerRequest, WorkerResponse,
 };
+
+/// Resolves the enclosing self-contained block of a hit line — a function,
+/// method, or class with its signature, decorators, and doc-comments — so a
+/// retrieved chunk is structurally complete rather than a fixed line window.
+/// Implementations may use a language grammar; a heuristic fallback covers the
+/// rest. Returns `None` when no block fits within `max_span`, and the caller
+/// keeps its fixed context window.
+pub trait StructureResolver {
+    fn enclosing_block(
+        &self,
+        path: &Path,
+        lines: &[String],
+        line: usize,
+        max_span: usize,
+    ) -> Option<LineRange>;
+}
 
 pub trait DocumentLoader {
     fn load(&self, root: &Path, paths: &[PathBuf], limits: &Limits) -> Result<LoadedDocuments>;

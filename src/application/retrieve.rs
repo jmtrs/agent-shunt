@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use crate::{
     application::ports::{
         ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DocumentLoader,
+        StructureResolver,
     },
     domain::{Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
 };
@@ -99,13 +100,33 @@ const CLIFF_GAP_PERCENT: usize = 30;
 /// (which is almost always within the top few) while still trimming the shoulder.
 const MIN_CLIFF_FILES: usize = 3;
 
-/// Executes bounded retrieval under a strict evidence token budget: any
-/// retrieved chunk that does not fit the budget is skipped entirely, never
-/// truncated, so selected evidence is always complete source context.
+/// Executes bounded retrieval with the dependency-free heuristic block
+/// resolver. The default entry point; [`execute_with_resolver`] injects an
+/// AST-backed resolver where one is available.
 pub fn execute(
     search: &dyn CodeSearch,
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
+    input: &RetrieveInput,
+) -> Result<(RetrieveResult, Vec<Document>)> {
+    execute_with_resolver(
+        search,
+        change_source,
+        loader,
+        &super::resolver::HeuristicResolver,
+        input,
+    )
+}
+
+/// Executes bounded retrieval under a strict evidence token budget: any
+/// retrieved chunk that does not fit the budget is skipped entirely, never
+/// truncated, so selected evidence is always complete source context. The
+/// `resolver` snaps each hit to its enclosing block.
+pub fn execute_with_resolver(
+    search: &dyn CodeSearch,
+    change_source: &dyn ChangeSource,
+    loader: &dyn DocumentLoader,
+    resolver: &dyn StructureResolver,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
     super::scan::validate_question(&input.question, &input.limits)?;
@@ -238,8 +259,13 @@ pub fn execute(
                 // function collapse to a single chunk instead of a scatter of
                 // overlapping fixed windows; fall back to the fixed window for
                 // top-level statements or blocks too large to be worth it.
-                let range = document
-                    .enclosing_block(*line, input.max_block_lines)
+                let range = resolver
+                    .enclosing_block(
+                        std::path::Path::new(&document.path),
+                        &document.lines,
+                        *line,
+                        input.max_block_lines,
+                    )
                     .unwrap_or(LineRange {
                         start_line: line.saturating_sub(input.context_lines).max(1),
                         end_line: (*line + input.context_lines).min(document.line_count),
@@ -388,13 +414,14 @@ pub fn execute_analyzed(
     search: &dyn CodeSearch,
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
+    resolver: &dyn StructureResolver,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
     input: &RetrieveInput,
     model: &str,
     fallback_models: &[String],
 ) -> Result<(ScanResult, usize, bool)> {
-    let (_, documents) = execute(search, change_source, loader, input)?;
+    let (_, documents) = execute_with_resolver(search, change_source, loader, resolver, input)?;
     if documents.is_empty() {
         bail!("automatic retrieval found no relevant source chunks within the token budget");
     }

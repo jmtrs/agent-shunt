@@ -72,66 +72,7 @@ impl Document {
     /// would exceed `max_span` lines, so the caller keeps its fixed window
     /// instead of swallowing a whole impl or file.
     pub fn enclosing_block(&self, line: usize, max_span: usize) -> Option<LineRange> {
-        let index = line.checked_sub(1)?;
-        let hit_indent = line_indent(self.lines.get(index)?)?;
-        // Header: nearest earlier non-blank line indented less than the hit.
-        let mut cursor = index;
-        let header = loop {
-            if cursor == 0 {
-                return None;
-            }
-            cursor -= 1;
-            if let Some(current) = line_indent(&self.lines[cursor])
-                && current < hit_indent
-            {
-                break (cursor, current);
-            }
-        };
-        let (start, header_indent) = header;
-        // Body: extend down while lines stay more indented than the header,
-        // spanning blank lines but stopping at the first line that returns to
-        // the header's level or below (the closing brace or the next sibling).
-        let mut end = index;
-        let mut cursor = index;
-        while cursor + 1 < self.lines.len() {
-            cursor += 1;
-            match line_indent(&self.lines[cursor]) {
-                Some(current) if current > header_indent => end = cursor,
-                Some(_) => break,
-                None => {}
-            }
-        }
-        // Signature: a delimiter-led header (a lone `{`, or a `) -> T {`
-        // continuation) is not the real definition line — the signature sits
-        // above it. Absorb the contiguous run of non-blank lines at or beyond
-        // the header's indent, so an Allman brace or a multi-line signature
-        // keeps its `fn foo(...)` / `int foo(int x)` line.
-        let mut start = start;
-        if is_continuation_line(&self.lines[start]) {
-            while start > 0 {
-                match line_indent(&self.lines[start - 1]) {
-                    Some(above) if above >= header_indent => start -= 1,
-                    _ => break,
-                }
-            }
-        }
-        // Decorators, attributes, and doc-comments directly above the header at
-        // its own indent belong to the definition (`@app.route`, `#[test]`,
-        // `///`), so a hit in the body still carries what the code *is*.
-        while start > 0 {
-            let above = &self.lines[start - 1];
-            match line_indent(above) {
-                Some(indent) if indent == header_indent && is_annotation_line(above) => {
-                    start -= 1;
-                }
-                _ => break,
-            }
-        }
-        let range = LineRange {
-            start_line: start + 1,
-            end_line: end + 1,
-        };
-        (range.end_line - range.start_line < max_span).then_some(range)
+        enclosing_block(&self.lines, line, max_span)
     }
 
     /// Trims blank and delimiter-only lines (`{`, `}`, `;`, ...) from a range's
@@ -158,6 +99,77 @@ impl Document {
             end_line: end,
         }
     }
+}
+
+/// Language-agnostic enclosing-block resolver over raw lines. Expands a hit to
+/// its enclosing indentation block: the nearest earlier non-blank line at a
+/// strictly smaller indent (the definition header), down through every line more
+/// indented than that header, then upward over the header's own signature
+/// (Allman braces / multi-line signatures) and any decorators, attributes, or
+/// doc-comments directly above it. Returns `None` when no smaller-indent header
+/// exists (a top-level statement) or the block would exceed `max_span` lines, so
+/// the caller keeps its fixed window instead of swallowing a whole impl or file.
+/// The heuristic fallback for languages the AST resolver does not cover.
+pub fn enclosing_block(lines: &[String], line: usize, max_span: usize) -> Option<LineRange> {
+    let index = line.checked_sub(1)?;
+    let hit_indent = line_indent(lines.get(index)?)?;
+    // Header: nearest earlier non-blank line indented less than the hit.
+    let mut cursor = index;
+    let header = loop {
+        if cursor == 0 {
+            return None;
+        }
+        cursor -= 1;
+        if let Some(current) = line_indent(&lines[cursor])
+            && current < hit_indent
+        {
+            break (cursor, current);
+        }
+    };
+    let (start, header_indent) = header;
+    // Body: extend down while lines stay more indented than the header, spanning
+    // blank lines but stopping at the first line that returns to the header's
+    // level or below (the closing brace or the next sibling).
+    let mut end = index;
+    let mut cursor = index;
+    while cursor + 1 < lines.len() {
+        cursor += 1;
+        match line_indent(&lines[cursor]) {
+            Some(current) if current > header_indent => end = cursor,
+            Some(_) => break,
+            None => {}
+        }
+    }
+    // Signature: a delimiter-led header (a lone `{`, or a `) -> T {` continuation)
+    // is not the real definition line — the signature sits above it. Absorb the
+    // contiguous run of non-blank lines at or beyond the header's indent, so an
+    // Allman brace or a multi-line signature keeps its `fn foo(...)` line.
+    let mut start = start;
+    if is_continuation_line(&lines[start]) {
+        while start > 0 {
+            match line_indent(&lines[start - 1]) {
+                Some(above) if above >= header_indent => start -= 1,
+                _ => break,
+            }
+        }
+    }
+    // Decorators, attributes, and doc-comments directly above the header at its
+    // own indent belong to the definition (`@app.route`, `#[test]`, `///`), so a
+    // hit in the body still carries what the code *is*.
+    while start > 0 {
+        let above = &lines[start - 1];
+        match line_indent(above) {
+            Some(indent) if indent == header_indent && is_annotation_line(above) => {
+                start -= 1;
+            }
+            _ => break,
+        }
+    }
+    let range = LineRange {
+        start_line: start + 1,
+        end_line: end + 1,
+    };
+    (range.end_line - range.start_line < max_span).then_some(range)
 }
 
 /// Indentation width of a line in bytes, or `None` for a blank line (one made

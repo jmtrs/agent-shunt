@@ -11,3 +11,5 @@ pub mod opencode_install;
 pub mod pre_tool_use;
 pub mod repo_install;
 pub mod ripgrep;
+#[cfg(feature = "ast")]
+pub mod tree_sitter_chunker;
