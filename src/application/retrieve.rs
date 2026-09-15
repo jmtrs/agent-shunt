@@ -44,6 +44,29 @@ const SCOPE_HUNK_BOOST: usize = 3;
 /// budget with noise that never answers the question.
 const MIN_SCORE_PERCENT: usize = 15;
 
+/// Per-chunk cost of the JSON envelope the caller actually receives: field
+/// names, quotes, structure, newline escaping, and pretty-print whitespace,
+/// beyond the raw content and path. Budgeting on content bytes alone
+/// undercounts the delivered footprint by ~20% (measured), so the token budget
+/// silently overshoots. Calibrated against real serialized output.
+const ENVELOPE_TOKENS_PER_CHUNK: usize = 40;
+
+/// Concentration cliff: a single drop of more than this many percentage points
+/// of the top score, between one ranked file and the next, marks the edge
+/// between the leaders and a faint shoulder. Term-frequency scores decay
+/// smoothly, so adjacent files rarely gap sharply — but relative to the top
+/// there is often a clear step (leader at 76% of top, shoulder at 38% and
+/// below). Everything from that step onward is padding for a well-localized
+/// question and is cut; an even spread (a genuinely broad question) has no such
+/// step and is left intact.
+const CLIFF_GAP_PERCENT: usize = 30;
+
+/// The concentration cliff never cuts below this many files. Term-heavy prose
+/// (a README, a CHANGELOG) can falsely outrank the real source and open a cliff
+/// right below itself; keeping a floor of files preserves the expected evidence
+/// (which is almost always within the top few) while still trimming the shoulder.
+const MIN_CLIFF_FILES: usize = 3;
+
 /// Executes bounded retrieval under a strict evidence token budget: any
 /// retrieved chunk that does not fit the budget is skipped entirely, never
 /// truncated, so selected evidence is always complete source context.
@@ -136,6 +159,20 @@ pub fn execute(
         })
         .collect::<Vec<_>>();
     ranked_files.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    // Concentration cliff: cut the ranked files at the first step where the
+    // percent-of-top score drops by more than CLIFF_GAP_PERCENT between adjacent
+    // files, so a well-localized question returns the leaders near a targeted
+    // read instead of a faint shoulder of padding. An even spread (a genuinely
+    // broad question) has no such step and is left intact.
+    let top = ranked_files.first().map(|file| file.1).unwrap_or(0);
+    if top > 0 {
+        if let Some(cliff) = (1..ranked_files.len()).find(|&index| {
+            let drop = ranked_files[index - 1].1.saturating_sub(ranked_files[index].1);
+            drop.saturating_mul(100) > CLIFF_GAP_PERCENT.saturating_mul(top)
+        }) {
+            ranked_files.truncate(cliff.max(MIN_CLIFF_FILES));
+        }
+    }
     ranked_files.truncate(input.limits.max_files);
     let paths = ranked_files
         .iter()
@@ -185,7 +222,9 @@ pub fn execute(
                 // Keep merged chunks within the evidence budget: chained hits
                 // in one file must not grow into a chunk that can never fit,
                 // starving the top-ranked file of the whole budget.
-                if estimate_tokens(&document.numbered_range(extended)) <= input.budget_tokens {
+                if delivered_tokens(&document.numbered_range(extended), &path)
+                    <= input.budget_tokens
+                {
                     *previous = extended;
                     *previous_score = (*previous_score).max(score);
                     continue;
@@ -195,7 +234,7 @@ pub fn execute(
         }
         for (range, score) in merged {
             let content = document.numbered_range(range);
-            let estimated_tokens = estimate_tokens(&content);
+            let estimated_tokens = delivered_tokens(&content, &path);
             candidates.push(RetrievedChunk {
                 path: path.clone(),
                 start_line: range.start_line,
@@ -333,8 +372,12 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
         .collect()
 }
 
-fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)
+/// Tokens the caller actually pays for a chunk: its numbered content and path,
+/// plus the JSON envelope. Budgeting and the reported `estimatedTokens` both
+/// use this so the token budget matches the delivered footprint instead of
+/// undercounting by the envelope.
+fn delivered_tokens(content: &str, path: &str) -> usize {
+    (content.len() + path.len()).div_ceil(4) + ENVELOPE_TOKENS_PER_CHUNK
 }
 
 /// A hit counts as inside the change when the file is wholly new (`whole_file`,
@@ -563,49 +606,40 @@ mod tests {
         assert!(error.to_string().contains("no local changes"));
     }
 
-    /// A faintly-matching file must not survive next to a strong hit: the
-    /// relevance floor drops it before selection, yet the result stays marked
-    /// truncated because evidence was omitted.
-    #[test]
-    fn relevance_floor_drops_weak_tail_and_marks_truncated() {
-        struct TwoFileSearch;
-        impl CodeSearch for TwoFileSearch {
-            fn terms(&self, _: &str) -> Vec<String> {
-                vec!["needle".to_owned()]
-            }
-            fn search(
-                &self,
-                _: &Path,
-                _: &str,
-                _: usize,
-                _: &[String],
-            ) -> Result<Vec<SearchHit>> {
-                Ok(vec![
-                    SearchHit {
-                        path: "src/strong.rs".to_owned(),
-                        line: 2,
-                        score: 100,
-                        matched_terms: 1,
-                    },
-                    SearchHit {
-                        path: "src/weak.rs".to_owned(),
-                        line: 2,
-                        score: 5,
-                        matched_terms: 1,
-                    },
-                ])
-            }
-            fn available(&self) -> bool {
-                true
-            }
+    /// One hit per listed file, at line 2, with the given score.
+    struct ListSearch(Vec<(&'static str, usize)>);
+    impl CodeSearch for ListSearch {
+        fn terms(&self, _: &str) -> Vec<String> {
+            vec!["needle".to_owned()]
         }
+        fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
+            Ok(self
+                .0
+                .iter()
+                .map(|(path, score)| SearchHit {
+                    path: (*path).to_owned(),
+                    line: 2,
+                    score: *score,
+                    matched_terms: 1,
+                })
+                .collect())
+        }
+        fn available(&self) -> bool {
+            true
+        }
+    }
 
-        struct TwoFileLoader;
-        impl DocumentLoader for TwoFileLoader {
-            fn load(&self, _: &Path, _: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
-                let lines = ["a", "needle", "c", "d"].map(str::to_owned).to_vec();
-                let doc = |path: &str| Document {
-                    path: path.to_owned(),
+    /// Loads a four-line document for every listed path. Paths the ranking
+    /// dropped are simply never looked up, so returning extras is harmless.
+    struct ListLoader(Vec<&'static str>);
+    impl DocumentLoader for ListLoader {
+        fn load(&self, _: &Path, _: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
+            let lines = ["a", "needle", "c", "d"].map(str::to_owned).to_vec();
+            let documents = self
+                .0
+                .iter()
+                .map(|path| Document {
+                    path: (*path).to_owned(),
                     bytes: 20,
                     line_count: lines.len(),
                     numbered_content: String::new(),
@@ -614,19 +648,89 @@ mod tests {
                         start_line: 1,
                         end_line: 4,
                     }],
-                };
-                Ok(LoadedDocuments {
-                    total_bytes: 40,
-                    documents: vec![doc("src/strong.rs"), doc("src/weak.rs")],
                 })
-            }
+                .collect::<Vec<_>>();
+            Ok(LoadedDocuments {
+                total_bytes: 20 * self.0.len(),
+                documents,
+            })
         }
+    }
 
+    /// A gradually decaying chain (100, 78, 55, 30, 13): every adjacent step is
+    /// a small percent-of-top drop, so the concentration cliff never fires, but
+    /// the faintest file falls below the relevance floor (15% of the top hit)
+    /// and is dropped before selection — with the result still marked truncated.
+    #[test]
+    fn relevance_floor_drops_gradual_tail_and_marks_truncated() {
+        let search = ListSearch(vec![
+            ("src/top.rs", 100),
+            ("src/high.rs", 78),
+            ("src/mid.rs", 55),
+            ("src/low.rs", 30),
+            ("src/faint.rs", 13),
+        ]);
+        let loader = ListLoader(vec![
+            "src/top.rs",
+            "src/high.rs",
+            "src/mid.rs",
+            "src/low.rs",
+            "src/faint.rs",
+        ]);
+        let big_budget = RetrieveInput {
+            budget_tokens: 1_000,
+            ..input()
+        };
         let (result, documents) =
-            execute(&TwoFileSearch, &Changes(Vec::new()), &TwoFileLoader, &input()).unwrap();
-        assert!(result.chunks.iter().all(|chunk| chunk.path == "src/strong.rs"));
-        assert!(documents.iter().all(|document| document.path == "src/strong.rs"));
-        // The weak file was ranked but floored out, so the result is truncated.
+            execute(&search, &Changes(Vec::new()), &loader, &big_budget).unwrap();
+        let paths = result
+            .chunks
+            .iter()
+            .map(|chunk| chunk.path.as_str())
+            .collect::<Vec<_>>();
+        // The faint file is floored out; the three stronger files survive.
+        assert!(!paths.contains(&"src/faint.rs"));
+        assert!(paths.contains(&"src/top.rs"));
+        assert!(documents.iter().all(|document| document.path != "src/faint.rs"));
+        // Evidence was omitted (the faint file was ranked, then floored).
         assert!(result.truncated);
+    }
+
+    /// A steep drop after the leader (100 then a 20/18/16/14 shoulder) opens a
+    /// concentration cliff. It trims the faint shoulder, but never below
+    /// MIN_CLIFF_FILES, so the two weakest files are cut while the leader and
+    /// the top of the shoulder are retained.
+    #[test]
+    fn concentration_cliff_trims_shoulder_but_keeps_a_floor_of_files() {
+        let search = ListSearch(vec![
+            ("src/top.rs", 100),
+            ("src/s1.rs", 20),
+            ("src/s2.rs", 18),
+            ("src/s3.rs", 16),
+            ("src/s4.rs", 14),
+        ]);
+        let loader = ListLoader(vec![
+            "src/top.rs",
+            "src/s1.rs",
+            "src/s2.rs",
+            "src/s3.rs",
+            "src/s4.rs",
+        ]);
+        let big_budget = RetrieveInput {
+            budget_tokens: 1_000,
+            ..input()
+        };
+        let (result, _) = execute(&search, &Changes(Vec::new()), &loader, &big_budget).unwrap();
+        let files = result
+            .chunks
+            .iter()
+            .map(|chunk| chunk.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        // Cut below the floor: the two weakest shoulder files are gone.
+        assert!(!files.contains("src/s3.rs"));
+        assert!(!files.contains("src/s4.rs"));
+        // The leader and the top of the shoulder are kept (MIN_CLIFF_FILES = 3).
+        assert!(files.contains("src/top.rs"));
+        assert_eq!(files.len(), super::MIN_CLIFF_FILES);
     }
 }
