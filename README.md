@@ -86,6 +86,11 @@ agent-shunt retrieve --analyze --question "Where is auth enforced?" --dir .
 # matching terms. Needs an embeddingModel in config; sends chunks to it.
 agent-shunt retrieve --semantic --question "Where is auth enforced?" --dir .
 
+# Opt-in precise re-ranking: the worker model scores the top candidates for
+# how directly they answer the question and reorders them. Combine with
+# --semantic for broad recall then precise reranking.
+agent-shunt retrieve --semantic --rerank --question "Where is auth enforced?" --dir .
+
 # Analyze files you picked yourself
 agent-shunt scan --question "Summarize this module" --path src/main.rs
 
@@ -95,7 +100,9 @@ agent-shunt doctor    # full local health report
 agent-shunt metrics   # aggregate usage and cost
 ```
 
-`retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`, `--semantic`. Retrieval tuning: `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` (also `mmrLambda`/`maxBlockLines`/`minScorePercent` config keys; CLI wins).
+`retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`, `--semantic`, `--rerank`. Retrieval tuning: `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` (also `mmrLambda`/`maxBlockLines`/`minScorePercent` config keys; CLI wins).
+
+`--semantic` and `--rerank` are the two-stage retrieval design: broad recall via lexical + dense fusion, then precise reranking of the top by the model. Both are opt-in and send candidate chunks to a provider; the default `retrieve` stays fully local.
 
 Chunks snap to their enclosing definition — the function, method, or class with its signature, decorators, and doc-comments — via tree-sitter (Rust, Python, JS/TS/TSX, Go, Java, C/C++, Ruby, Bash, JSON), falling back to a language-agnostic indentation heuristic elsewhere. Build with `--no-default-features` to drop tree-sitter and use the heuristic everywhere.
 
@@ -103,7 +110,7 @@ Chunks snap to their enclosing definition — the function, method, or class wit
 
 - **Read-only.** Never writes to your repository.
 - **`retrieve` is fully local by default**: no network, no API key. `--analyze`, `scan`, and the opt-in `--semantic` pass are the only paths that reach a provider.
-- **The model sees only the selected chunks**, never your whole repo. `--semantic` sends the same candidate chunks to your embeddings endpoint under its data policy; the default retrieval never leaves your machine.
+- **The model sees only the selected chunks**, never your whole repo. `--semantic` sends candidate chunks to your embeddings endpoint and `--rerank` sends the top candidates to the worker model, each under its data policy; the default retrieval never leaves your machine.
 - **On OpenRouter**, every request — worker and embeddings alike — enforces Zero Data Retention routing and blocks data-collecting and `:free` routes. On any other provider, their data policy is between you and them.
 - **Credentials never travel in cleartext**: plain `http` endpoints are limited to localhost and private networks. Redirects and environment proxies are ignored.
 - **Your key stays local**: read at runtime, never printed, logged, or written to metrics. Metrics are aggregates only (status, model, timing, tokens, cost) — never questions, code, or answers.

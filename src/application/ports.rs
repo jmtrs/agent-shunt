@@ -57,6 +57,15 @@ pub trait DenseRanker {
     fn similarities(&self, question: &str, candidates: &[String]) -> Result<Vec<f32>>;
 }
 
+/// Scores how directly each candidate answers the question, in `[0, 1]` and in
+/// the same order — a cross-encoder-style relevance judgement. The application
+/// reorders the top candidates by this score before packing the budget. The
+/// implementation owns the model, key, and transport. Optional: only the opt-in
+/// `--rerank` path constructs one.
+pub trait Reranker {
+    fn scores(&self, question: &str, candidates: &[String]) -> Result<Vec<f32>>;
+}
+
 pub trait CredentialResolver {
     fn resolve(&self) -> Result<ResolvedCredential>;
 }

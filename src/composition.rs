@@ -12,13 +12,15 @@ use crate::{
         gemini_install::GeminiInstaller,
         git::GitChangeSource,
         metrics::JsonlMetrics,
-        openai_compatible::{EmbeddingDenseRanker, OpenAiCompatibleWorker},
+        openai_compatible::{EmbeddingDenseRanker, LlmReranker, OpenAiCompatibleWorker},
         opencode_install::OpencodeInstaller,
         repo_install::RepoInstaller,
         ripgrep::RipgrepSearch,
     },
     application::{
-        ports::{CodeSearch, CredentialResolver, DenseRanker, HostInstaller, MetricsSink},
+        ports::{
+            CodeSearch, CredentialResolver, DenseRanker, HostInstaller, MetricsSink, Reranker,
+        },
         retrieve::{self, RetrieveInput},
         scan::{self, ScanInput},
     },
@@ -180,11 +182,24 @@ impl Application {
         ))
     }
 
+    /// Builds the opt-in LLM re-ranker for `--rerank`, reusing the worker's
+    /// model, base URL, and credentials.
+    fn reranker_for(&self, config: &Config) -> Result<LlmReranker> {
+        let api_key = self.credentials_for(config).resolve()?.api_key;
+        Ok(LlmReranker::new(
+            &config.base_url,
+            &config.model,
+            &api_key,
+            config.limits.clone(),
+        ))
+    }
+
     pub fn retrieve(
         &self,
         input: RetrieveInput,
         analyze: bool,
         semantic: bool,
+        rerank: bool,
         config: &Config,
     ) -> Result<Value> {
         let started = Instant::now();
@@ -194,6 +209,12 @@ impl Application {
             None
         };
         let dense = dense.as_ref().map(|ranker| ranker as &dyn DenseRanker);
+        let reranker = if rerank {
+            Some(self.reranker_for(config)?)
+        } else {
+            None
+        };
+        let reranker = reranker.as_ref().map(|ranker| ranker as &dyn Reranker);
         let result = if analyze {
             let credentials = self.credentials_for(config);
             let worker = self.worker_for(config);
@@ -203,6 +224,7 @@ impl Application {
                 &self.filesystem,
                 &self.resolver,
                 dense,
+                reranker,
                 &credentials,
                 &worker,
                 &input,
@@ -230,6 +252,7 @@ impl Application {
                 &self.filesystem,
                 &self.resolver,
                 dense,
+                reranker,
                 &input,
             )
             .and_then(|(retrieval_result, documents)| {

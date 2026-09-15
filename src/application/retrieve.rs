@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use crate::{
     application::ports::{
         ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseRanker, DocumentLoader,
-        StructureResolver,
+        Reranker, StructureResolver,
     },
     domain::{Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
 };
@@ -111,6 +111,11 @@ const RRF_K: f64 = 60.0;
 /// where a semantically relevant chunk realistically sits.
 const MAX_SEMANTIC_CANDIDATES: usize = 96;
 
+/// Most candidates sent to the LLM re-ranker. Reranking is the costly stage, so
+/// it is applied only to the head of the ranking (broad recall first, precise
+/// reranking of the top) — the standard two-stage design.
+const RERANK_TOP_K: usize = 20;
+
 /// Executes bounded retrieval with the dependency-free heuristic block
 /// resolver. The default entry point; [`execute_with_resolver`] injects an
 /// AST-backed resolver where one is available.
@@ -125,6 +130,7 @@ pub fn execute(
         change_source,
         loader,
         &super::resolver::HeuristicResolver,
+        None,
         None,
         input,
     )
@@ -141,6 +147,7 @@ pub fn execute_with_resolver(
     loader: &dyn DocumentLoader,
     resolver: &dyn StructureResolver,
     dense: Option<&dyn DenseRanker>,
+    rerank: Option<&dyn Reranker>,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
     super::scan::validate_question(&input.question, &input.limits)?;
@@ -338,6 +345,13 @@ pub fn execute_with_resolver(
     if let Some(dense) = dense {
         rescore_semantic(dense, &input.question, &mut candidates)?;
     }
+    // Optional precise re-ranking: an LLM scores the head of the ranking for how
+    // directly each chunk answers the question, and the top is reordered by that
+    // score before the budget is packed. Costly, so it runs only on the top-k
+    // and only when `--rerank` supplies a reranker.
+    if let Some(rerank) = rerank {
+        rerank_candidates(rerank, &input.question, &mut candidates)?;
+    }
     // Relevance floor: drop the ranked tail whose score is a small fraction of
     // the top hit before anything is selected, so weakly-related files never
     // consume the token budget. `available_count` is captured above, so any
@@ -437,14 +451,22 @@ pub fn execute_analyzed(
     loader: &dyn DocumentLoader,
     resolver: &dyn StructureResolver,
     dense: Option<&dyn DenseRanker>,
+    rerank: Option<&dyn Reranker>,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
     input: &RetrieveInput,
     model: &str,
     fallback_models: &[String],
 ) -> Result<(ScanResult, usize, bool)> {
-    let (_, documents) =
-        execute_with_resolver(search, change_source, loader, resolver, dense, input)?;
+    let (_, documents) = execute_with_resolver(
+        search,
+        change_source,
+        loader,
+        resolver,
+        dense,
+        rerank,
+        input,
+    )?;
     if documents.is_empty() {
         bail!("automatic retrieval found no relevant source chunks within the token budget");
     }
@@ -534,6 +556,58 @@ fn rescore_semantic(
     for (position, (index, _)) in fused.iter().enumerate() {
         // Fused rank -> descending integer score the rest of the pipeline reads.
         candidates[*index].score = count - position;
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+    Ok(())
+}
+
+/// Reorders the top-k candidates by an LLM relevance score, lifting them above
+/// the untouched tail so the budget packs the model-preferred chunks first. The
+/// tail keeps its ranking; only the head is re-judged, bounding the LLM cost.
+fn rerank_candidates(
+    rerank: &dyn Reranker,
+    question: &str,
+    candidates: &mut [RetrievedChunk],
+) -> Result<()> {
+    let head = candidates.len().min(RERANK_TOP_K);
+    if head < 2 {
+        return Ok(());
+    }
+    let texts = candidates[..head]
+        .iter()
+        .map(|candidate| candidate.content.clone())
+        .collect::<Vec<_>>();
+    let scores = rerank.scores(question, &texts)?;
+    if scores.len() != head {
+        bail!(
+            "reranker returned {} scores for {} candidates",
+            scores.len(),
+            head
+        );
+    }
+    // Order the head by descending relevance, ties broken by the prior rank so
+    // the reorder is stable and deterministic.
+    let mut order = (0..head).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| {
+        scores[right]
+            .partial_cmp(&scores[left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.cmp(&right))
+    });
+    // Score the head above the tail's best so its new order survives the final
+    // sort while the tail's relative ranking is preserved.
+    let tail_max = candidates
+        .get(head)
+        .map(|candidate| candidate.score)
+        .unwrap_or(0);
+    for (position, &index) in order.iter().enumerate() {
+        candidates[index].score = tail_max + head - position;
     }
     candidates.sort_by(|left, right| {
         right
@@ -707,6 +781,35 @@ mod tests {
             assert_eq!(candidates.len(), self.0.len());
             Ok(self.0.clone())
         }
+    }
+
+    struct MockRerank(Vec<f32>);
+    impl crate::application::ports::Reranker for MockRerank {
+        fn scores(&self, _question: &str, candidates: &[String]) -> Result<Vec<f32>> {
+            Ok(self.0[..candidates.len()].to_vec())
+        }
+    }
+
+    #[test]
+    fn rerank_lifts_the_model_preferred_chunk_to_the_top() {
+        // Lexical order a > b > c; the reranker judges c most relevant, so it
+        // must lead after reranking, the rest following its score order.
+        let chunk = |path: &str, score: usize| RetrievedChunk {
+            path: path.to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score,
+            estimated_tokens: 10,
+            content: format!("{path} body"),
+        };
+        let mut candidates = vec![chunk("a", 100), chunk("b", 90), chunk("c", 80)];
+        let rerank = MockRerank(vec![0.1, 0.2, 0.9]);
+        super::rerank_candidates(&rerank, "question", &mut candidates).unwrap();
+        let order = candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["c", "b", "a"]);
     }
 
     #[test]

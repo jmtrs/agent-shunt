@@ -202,6 +202,11 @@ struct RetrieveArgs {
     /// `embeddingModel` in config and sends candidate chunks to that endpoint.
     #[arg(long)]
     semantic: bool,
+    /// Opt-in precise re-ranking: the worker model scores the top candidate
+    /// chunks for how directly they answer the question and reorders them
+    /// before the budget is packed. Sends those chunks to the model.
+    #[arg(long)]
+    rerank: bool,
 }
 
 fn main() {
@@ -257,7 +262,7 @@ fn run() -> Result<()> {
                     .or(config.min_score_percent)
                     .unwrap_or(MIN_SCORE_PERCENT),
             };
-            app.retrieve(input, args.analyze, args.semantic, &config)?
+            app.retrieve(input, args.analyze, args.semantic, args.rerank, &config)?
         }
         Some(Command::Check(args)) => {
             let config = config::load(args.model.as_deref())?;
