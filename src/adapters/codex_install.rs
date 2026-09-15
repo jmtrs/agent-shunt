@@ -15,7 +15,7 @@ use crate::{
     domain::InstallReport,
 };
 
-const SKILL: &str = include_str!("../../integrations/codex/skills/agent-shunt/SKILL.md");
+const SKILL: &str = include_str!("../../integrations/skills/agent-shunt/SKILL.md");
 const OPENAI_YAML: &str =
     include_str!("../../integrations/codex/skills/agent-shunt/agents/openai.yaml");
 const STATUS_MESSAGE: &str = "Checking large whole-file read";

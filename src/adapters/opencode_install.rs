@@ -14,7 +14,7 @@ use crate::{
     domain::InstallReport,
 };
 
-const SKILL: &str = include_str!("../../integrations/opencode/skills/agent-shunt/SKILL.md");
+const SKILL: &str = include_str!("../../integrations/skills/agent-shunt/SKILL.md");
 
 pub struct OpencodeInstaller;
 

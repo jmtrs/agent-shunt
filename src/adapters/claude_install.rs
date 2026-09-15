@@ -17,7 +17,7 @@ use crate::{
     domain::InstallReport,
 };
 
-const SKILL: &str = include_str!("../../integrations/claude/skills/agent-shunt/SKILL.md");
+const SKILL: &str = include_str!("../../integrations/skills/agent-shunt/SKILL.md");
 const HOOK_SUFFIX: &str = " hook claude-pre-tool-use";
 
 pub struct ClaudeInstaller {
