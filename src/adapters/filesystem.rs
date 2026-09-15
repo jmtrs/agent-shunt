@@ -87,19 +87,24 @@ impl DocumentLoader for SecureFilesystem {
             if !same_file_snapshot(&before, &after) || buffer.len() as u64 != after.len() {
                 bail!("file changed while being read: {}", input.display());
             }
+            // A binary or non-UTF-8 file is never useful evidence. Skip it
+            // rather than aborting the whole batch: automatic retrieval can
+            // select an asset (matched by filename) alongside real source, and
+            // one such file must not sink every other selected document.
             if buffer.iter().take(8_192).any(|byte| *byte == 0) {
-                bail!("binary file rejected: {}", input.display());
+                continue;
             }
-            total_bytes = total_bytes.saturating_add(buffer.len());
+            let byte_len = buffer.len();
+            let Ok(text) = String::from_utf8(buffer) else {
+                continue;
+            };
+            total_bytes = total_bytes.saturating_add(byte_len);
             if total_bytes > limits.max_total_bytes {
                 bail!(
                     "input exceeds aggregate limit of {} bytes",
                     limits.max_total_bytes
                 );
             }
-            let byte_len = buffer.len();
-            let text = String::from_utf8(buffer)
-                .map_err(|_| anyhow::anyhow!("invalid UTF-8 file rejected: {}", input.display()))?;
             let lines = text
                 .split('\n')
                 .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
@@ -238,17 +243,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_binary() {
+    fn skips_binary_without_aborting_batch() {
         let root = tempdir().unwrap();
         fs::write(root.path().join("binary"), [1, 0, 2]).unwrap();
-        let error = SecureFilesystem
-            .load(root.path(), &[PathBuf::from("binary")], &limits())
-            .unwrap_err();
-        assert!(error.to_string().contains("binary file rejected"));
+        fs::write(root.path().join("real.rs"), "let ok = 1;").unwrap();
+        let loaded = SecureFilesystem
+            .load(
+                root.path(),
+                &[PathBuf::from("binary"), PathBuf::from("real.rs")],
+                &limits(),
+            )
+            .unwrap();
+        assert_eq!(loaded.documents.len(), 1);
+        assert_eq!(loaded.documents[0].path, "real.rs");
     }
 
     #[test]
-    fn rejects_invalid_utf8_even_after_binary_probe() {
+    fn skips_invalid_utf8_even_after_binary_probe() {
         let root = tempdir().unwrap();
         let mut bytes = vec![b'a'; 9_000];
         bytes.push(0xff);
@@ -256,10 +267,10 @@ mod tests {
         let mut generous = limits();
         generous.max_file_bytes = 10_000;
         generous.max_total_bytes = 10_000;
-        let error = SecureFilesystem
+        let loaded = SecureFilesystem
             .load(root.path(), &[PathBuf::from("invalid")], &generous)
-            .unwrap_err();
-        assert!(error.to_string().contains("invalid UTF-8"));
+            .unwrap();
+        assert!(loaded.documents.is_empty());
     }
 
     #[cfg(unix)]

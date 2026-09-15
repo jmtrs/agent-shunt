@@ -37,6 +37,27 @@ const EXCLUDED_GLOBS: &[&str] = &[
     "!flake.lock",
 ];
 
+/// Filename extensions that never hold readable source. A filename match on one
+/// of these (e.g. `create-table.png`) must never enter the ranked set.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "pdf", "zip", "gz", "tar", "bz2",
+    "xz", "7z", "rar", "jar", "war", "class", "exe", "dll", "so", "dylib", "bin", "dat", "wasm",
+    "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "mkv", "wav", "flac", "psd",
+    "lockb", "node", "pyc", "obj",
+];
+
+/// Scales the (logarithmic) inverse document frequency into integer term
+/// weights. Rarer terms outweigh generic ones, but the log keeps the spread
+/// gentle so a file matching one rare term stays competitive with a prose file
+/// that happens to mention several common ones.
+const IDF_SCALE: f64 = 4.0;
+
+/// A file whose *name* matches a query term is a strong locator ("metrics" ->
+/// metrics.rs), so a filename match is worth several content occurrences of the
+/// same term. Weighted by the term's rarity, so a generic filename token cannot
+/// dominate the way `create-table.png` used to.
+const FILENAME_BOOST: usize = 8;
+
 const STOP_WORDS: &[&str] = &[
     "the", "and", "for", "with", "where", "what", "which", "from", "this", "that", "los", "las",
     "una", "uno", "del", "con", "donde", "dónde", "como", "cómo", "que", "qué", "por", "para",
@@ -48,14 +69,26 @@ impl CodeSearch for RipgrepSearch {
         query_terms(question)
     }
 
-    fn search(&self, root: &Path, question: &str, max_hits: usize) -> Result<Vec<SearchHit>> {
+    fn search(
+        &self,
+        root: &Path,
+        question: &str,
+        max_hits: usize,
+        globs: &[String],
+    ) -> Result<Vec<SearchHit>> {
         let terms = query_terms(question);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let mut hits = filename_hits(root, &terms, 10_000)?;
+        // Search and score on stems so a plural query term still recovers the
+        // singular in code: `paths` -> `path`, `questions` -> `question`.
+        let stems = terms.iter().map(|term| stem(term)).collect::<Vec<_>>();
+        let matchers = term_matchers(&stems);
+        let intrinsic = intrinsic_weights(&terms);
+        let mut filename_raw = filename_hits(root, &stems, globs, 10_000)?;
+        let mut hits: Vec<SearchHit> = Vec::new();
         let raw_hit_limit = max_hits.saturating_mul(50).clamp(max_hits, 5_000);
-        let pattern = terms
+        let pattern = stems
             .iter()
             .map(|term| regex::escape(term))
             .collect::<Vec<_>>()
@@ -72,6 +105,9 @@ impl CodeSearch for RipgrepSearch {
             "5M",
         ]);
         for glob in EXCLUDED_GLOBS {
+            command.args(["--glob", glob]);
+        }
+        for glob in globs {
             command.args(["--glob", glob]);
         }
         command.args(["--", &pattern, "."]);
@@ -113,16 +149,22 @@ impl CodeSearch for RipgrepSearch {
             let text = event
                 .pointer("/data/lines/text")
                 .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_lowercase();
-            let matched_terms = terms.iter().enumerate().fold(0u16, |mask, (index, term)| {
-                mask | (u16::from(text.contains(&term.to_lowercase())) << index)
-            });
-            let score = matched_terms.count_ones().max(1) as usize;
+                .unwrap_or_default();
+            // Score on whole-word matches only: "table" must not credit a line
+            // that merely contains "constable" or "tableau".
+            let matched_terms = matchers
+                .iter()
+                .enumerate()
+                .fold(0u16, |mask, (index, matcher)| {
+                    mask | (u16::from(matcher.is_match(text)) << index)
+                });
+            if matched_terms == 0 {
+                continue;
+            }
             hits.push(SearchHit {
                 path: path.strip_prefix("./").unwrap_or(path).to_owned(),
                 line: line_number as usize,
-                score,
+                score: 0,
                 matched_terms,
             });
             if hits.len() >= raw_hit_limit {
@@ -141,14 +183,51 @@ impl CodeSearch for RipgrepSearch {
         for hit in &hits {
             *coverage.entry(hit.path.clone()).or_default() |= hit.matched_terms;
         }
-        for hit in &mut hits {
-            hit.score = hit.score * 2
-                + coverage
-                    .get(hit.path.as_str())
-                    .copied()
-                    .unwrap_or_default()
-                    .count_ones() as usize;
+        // Inverse document frequency from content matches: a term found in many
+        // files is generic and cheap; a term found in few files is discriminating.
+        let total_files = coverage.len().max(1);
+        let mut document_frequency = vec![0usize; terms.len()];
+        for mask in coverage.values() {
+            for index in set_bits(*mask) {
+                document_frequency[index] += 1;
+            }
         }
+        let term_weight = (0..terms.len())
+            .map(|index| {
+                let df = document_frequency[index].max(1);
+                let idf = (1.0 + total_files as f64 / df as f64).log2();
+                ((intrinsic[index] as f64) * IDF_SCALE * idf)
+                    .round()
+                    .max(1.0) as usize
+            })
+            .collect::<Vec<_>>();
+        // A filename match locates the subject file, so fold its IDF-weighted
+        // boost into every content hit of that path (lifting the whole file) and
+        // keep it as the score for files matched only by name.
+        let mut filename_boost = std::collections::HashMap::<String, usize>::new();
+        for hit in &filename_raw {
+            let boost = weight_of(hit.matched_terms, &term_weight) * FILENAME_BOOST;
+            filename_boost
+                .entry(hit.path.clone())
+                .and_modify(|value| *value = (*value).max(boost))
+                .or_insert(boost);
+        }
+        for hit in &mut hits {
+            let line_weight = weight_of(hit.matched_terms, &term_weight);
+            let file_weight = coverage
+                .get(hit.path.as_str())
+                .copied()
+                .map(|mask| weight_of(mask, &term_weight))
+                .unwrap_or_default();
+            let name_boost = filename_boost.get(hit.path.as_str()).copied().unwrap_or(0);
+            // Reward the matching line, a smaller bonus for how much of the whole
+            // query the file covers, and the filename locator boost.
+            hit.score = line_weight * 2 + file_weight + name_boost;
+        }
+        for hit in &mut filename_raw {
+            hit.score = weight_of(hit.matched_terms, &term_weight) * FILENAME_BOOST;
+        }
+        hits.append(&mut filename_raw);
         hits.sort_by(|left, right| {
             right
                 .score
@@ -179,10 +258,18 @@ impl CodeSearch for RipgrepSearch {
     }
 }
 
-fn filename_hits(root: &Path, terms: &[String], scan_limit: usize) -> Result<Vec<SearchHit>> {
+fn filename_hits(
+    root: &Path,
+    terms: &[String],
+    globs: &[String],
+    scan_limit: usize,
+) -> Result<Vec<SearchHit>> {
     let mut command = Command::new("rg");
     command.current_dir(root).args(["--files"]);
     for glob in EXCLUDED_GLOBS {
+        command.args(["--glob", glob]);
+    }
+    for glob in globs {
         command.args(["--glob", glob]);
     }
     command
@@ -212,16 +299,20 @@ fn filename_hits(root: &Path, terms: &[String], scan_limit: usize) -> Result<Vec
             break;
         }
         scanned += 1;
+        if has_binary_extension(&path) {
+            continue;
+        }
         let normalized = path.to_lowercase();
         let matched_terms = terms.iter().enumerate().fold(0u16, |mask, (index, term)| {
             mask | (u16::from(normalized.contains(&term.to_lowercase())) << index)
         });
-        let score = matched_terms.count_ones() as usize;
-        if score > 0 {
+        if matched_terms != 0 {
+            // Scored later against inverse-document-frequency term weights so a
+            // filename hit cannot outrank a real content match.
             hits.push(SearchHit {
                 path,
                 line: 1,
-                score: score * 2,
+                score: 0,
                 matched_terms,
             });
         }
@@ -279,6 +370,75 @@ fn query_terms(question: &str) -> Vec<String> {
         .collect()
 }
 
+/// Compiles one case-insensitive matcher per query term. The term must begin at
+/// a token boundary — the string start or a non-alphanumeric character, which
+/// includes `_` so `validate` still matches `validate_question`. The tail is
+/// left open so morphology still counts: `path` matches `paths`, `exclude`
+/// matches `excludes`. Requiring the left boundary rejects the substring noise
+/// the caller reported, e.g. `table` inside `constable` or `comfortable`.
+fn term_matchers(terms: &[String]) -> Vec<Regex> {
+    terms
+        .iter()
+        .map(|term| {
+            Regex::new(&format!(
+                r"(?i)(?:^|[^\p{{L}}\p{{N}}]){}",
+                regex::escape(term)
+            ))
+            .expect("valid term regex")
+        })
+        .collect()
+}
+
+/// Base weight before inverse-document-frequency scaling. Identifier-shaped
+/// terms (camelCase, snake_case, namespaced, or long) are far more likely to be
+/// what the caller actually meant than short lowercase words.
+fn intrinsic_weights(terms: &[String]) -> Vec<usize> {
+    terms
+        .iter()
+        .map(|term| if is_identifier_like(term) { 3 } else { 1 })
+        .collect()
+}
+
+fn is_identifier_like(term: &str) -> bool {
+    term.len() >= 8
+        || term.contains('_')
+        || term.contains("::")
+        || term.contains('.')
+        || term.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// Naive suffix stemmer: drops a trailing plural/verb `s`/`es` so a query in one
+/// grammatical number still matches code written in the other. Deliberately
+/// conservative — it only trims, never rewrites, to avoid surprising matches.
+fn stem(term: &str) -> String {
+    let lower = term.to_lowercase();
+    if lower.len() > 4 && lower.ends_with("es") {
+        lower[..lower.len() - 2].to_owned()
+    } else if lower.len() > 3 && lower.ends_with('s') && !lower.ends_with("ss") {
+        lower[..lower.len() - 1].to_owned()
+    } else {
+        lower
+    }
+}
+
+fn set_bits(mask: u16) -> impl Iterator<Item = usize> {
+    (0..u16::BITS as usize).filter(move |index| mask & (1 << index) != 0)
+}
+
+fn weight_of(mask: u16, term_weight: &[usize]) -> usize {
+    set_bits(mask)
+        .filter_map(|index| term_weight.get(index).copied())
+        .sum()
+}
+
+fn has_binary_extension(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| BINARY_EXTENSIONS.contains(&extension.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -301,7 +461,9 @@ mod tests {
     fn mixed_case_terms_still_match_lowercase_content() {
         let root = tempdir().unwrap();
         fs::write(root.path().join("code.rs"), "let token = auth_value;").unwrap();
-        let hits = RipgrepSearch.search(root.path(), "Auth token", 10).unwrap();
+        let hits = RipgrepSearch
+            .search(root.path(), "Auth token", 10, &[])
+            .unwrap();
         assert!(hits.iter().any(|hit| hit.path == "code.rs"));
     }
 
@@ -316,8 +478,75 @@ mod tests {
             .unwrap();
         }
         let hits = RipgrepSearch
-            .search(root.path(), "bounded-search-marker", 7)
+            .search(root.path(), "bounded-search-marker", 7, &[])
             .unwrap();
         assert_eq!(hits.len(), 7);
+    }
+
+    #[test]
+    fn token_scoring_ignores_infix_substring_noise() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("noise.rs"), "let constable = comfortable;").unwrap();
+        fs::write(root.path().join("hit.rs"), "let table_name = 1;").unwrap();
+        let hits = RipgrepSearch.search(root.path(), "table", 10, &[]).unwrap();
+        // Token-prefix match: `table` credits `table_name` but not the `table`
+        // buried inside `constable` / `comfortable`.
+        assert!(hits.iter().any(|hit| hit.path == "hit.rs"));
+        assert!(!hits.iter().any(|hit| hit.path == "noise.rs"));
+    }
+
+    #[test]
+    fn rare_identifier_outranks_generic_term() {
+        let root = tempdir().unwrap();
+        for index in 0..8 {
+            fs::write(
+                root.path().join(format!("common-{index}.rs")),
+                "fn handle() { success(); }\n",
+            )
+            .unwrap();
+        }
+        fs::write(
+            root.path().join("target.rs"),
+            "fn createTableListTableTransaction() {}\n",
+        )
+        .unwrap();
+        let hits = RipgrepSearch
+            .search(
+                root.path(),
+                "success createTableListTableTransaction",
+                20,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(hits.first().map(|hit| hit.path.as_str()), Some("target.rs"));
+    }
+
+    #[test]
+    fn binary_extension_files_are_never_ranked() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("create-table.png"), [0u8, 1, 2, 3]).unwrap();
+        fs::write(
+            root.path().join("create_table.rs"),
+            "fn create_table() {}\n",
+        )
+        .unwrap();
+        let hits = RipgrepSearch
+            .search(root.path(), "create table", 10, &[])
+            .unwrap();
+        assert!(hits.iter().all(|hit| hit.path != "create-table.png"));
+    }
+
+    #[test]
+    fn user_glob_scopes_the_search() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::create_dir(root.path().join("docs")).unwrap();
+        fs::write(root.path().join("src/code.rs"), "let marker = 1;").unwrap();
+        fs::write(root.path().join("docs/notes.md"), "marker\n").unwrap();
+        let hits = RipgrepSearch
+            .search(root.path(), "marker", 10, &["!docs/**".to_owned()])
+            .unwrap();
+        assert!(hits.iter().any(|hit| hit.path.contains("code.rs")));
+        assert!(hits.iter().all(|hit| !hit.path.contains("notes.md")));
     }
 }

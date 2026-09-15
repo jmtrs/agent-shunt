@@ -13,7 +13,13 @@ pub trait DocumentLoader {
 
 pub trait CodeSearch {
     fn terms(&self, question: &str) -> Vec<String>;
-    fn search(&self, root: &Path, question: &str, max_hits: usize) -> Result<Vec<SearchHit>>;
+    fn search(
+        &self,
+        root: &Path,
+        question: &str,
+        max_hits: usize,
+        globs: &[String],
+    ) -> Result<Vec<SearchHit>>;
     fn available(&self) -> bool;
 }
 

@@ -100,6 +100,13 @@ struct RetrieveArgs {
     context_lines: usize,
     #[arg(long, default_value_t = 200)]
     max_hits: usize,
+    /// Ripgrep glob applied to the search (repeatable). Prefix with `!` to
+    /// exclude, e.g. `--glob '!public/**'` or `--glob 'src/**'`.
+    #[arg(long = "glob")]
+    glob: Vec<String>,
+    /// Exclude paths matching this glob (repeatable); sugar for `--glob '!<pat>'`.
+    #[arg(long = "exclude")]
+    exclude: Vec<String>,
     #[arg(long)]
     analyze: bool,
 }
@@ -125,6 +132,12 @@ fn run() -> Result<()> {
         }
         Some(Command::Retrieve(args)) => {
             let config = config::load(args.model.as_deref())?;
+            let mut globs = args.glob;
+            globs.extend(
+                args.exclude
+                    .into_iter()
+                    .map(|pattern| format!("!{pattern}")),
+            );
             let input = RetrieveInput {
                 question: args.question,
                 cwd: args.cwd,
@@ -132,6 +145,7 @@ fn run() -> Result<()> {
                 budget_tokens: args.budget_tokens,
                 context_lines: args.context_lines,
                 max_hits: args.max_hits,
+                globs,
             };
             app.retrieve(input, args.analyze, &config)?
         }

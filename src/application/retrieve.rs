@@ -15,6 +15,7 @@ pub struct RetrieveInput {
     pub budget_tokens: usize,
     pub context_lines: usize,
     pub max_hits: usize,
+    pub globs: Vec<String>,
 }
 
 /// Executes bounded retrieval under a strict evidence token budget: any
@@ -45,7 +46,7 @@ pub fn execute(
     if terms.is_empty() {
         bail!("question contains no searchable terms");
     }
-    let hits = search.search(&input.cwd, &input.question, input.max_hits)?;
+    let hits = search.search(&input.cwd, &input.question, input.max_hits, &input.globs)?;
     let mut grouped: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
     for hit in hits {
         grouped
@@ -259,7 +260,7 @@ mod tests {
         fn terms(&self, _: &str) -> Vec<String> {
             vec!["needle".to_owned()]
         }
-        fn search(&self, _: &Path, _: &str, _: usize) -> Result<Vec<SearchHit>> {
+        fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
             Ok(vec![
                 SearchHit {
                     path: "src/a.rs".to_owned(),
@@ -315,6 +316,7 @@ mod tests {
                 budget_tokens: 100,
                 context_lines: 1,
                 max_hits: 10,
+                globs: Vec::new(),
             },
         )
         .unwrap();
@@ -333,6 +335,7 @@ mod tests {
             budget_tokens: 0,
             context_lines: 1,
             max_hits: 10,
+            globs: Vec::new(),
         };
         assert!(execute(&Search, &Loader, &base).is_err());
 

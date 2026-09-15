@@ -51,6 +51,7 @@ fn representative_repository_queries_recover_expected_evidence() {
                 budget_tokens: 1_200,
                 context_lines: 8,
                 max_hits: 40,
+                globs: Vec::new(),
             },
         )
         .unwrap_or_else(|error| panic!("evaluation query failed: {question}: {error}"));
