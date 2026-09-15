@@ -16,6 +16,15 @@ const MAX_SUMMARY_UTF16: usize = 2_000;
 const MAX_UNCERTAINTY_UTF16: usize = 2_000;
 const MAX_FINDINGS: usize = 100;
 const MAX_UNCERTAINTIES: usize = 50;
+/// Milliseconds of the overall worker deadline reserved for each fallback model
+/// still to try. A slow primary otherwise consumes the whole deadline and the
+/// fallback — a different provider, the one that helps when the primary hangs —
+/// never runs. Real failures cluster at slow-primary timeouts, so guaranteeing
+/// the fallback a slice is what converts those into a second, likely-healthy try.
+const FALLBACK_RESERVE_MS: u64 = 20_000;
+/// Floor for a single attempt's timeout, so reserving for fallbacks never starves
+/// the current model below a usable budget (only capped by what remains).
+const MIN_ATTEMPT_MS: u64 = 5_000;
 /// When retrieval hands the worker a file as several nearby chunks, a correct
 /// finding often spans two of them (and the small gap between). Merging allowed
 /// ranges separated by at most this many lines lets such a finding validate,
@@ -137,7 +146,19 @@ pub fn analyze_documents(
             break;
         }
         let mut attempt_limits = limits.clone();
-        attempt_limits.timeout_ms = remaining.as_millis().clamp(1, u64::MAX as u128) as u64;
+        // Reserve time for each fallback still to try, so a slow primary cannot
+        // consume the whole deadline and starve them. The fallback is a
+        // different provider and is exactly what should get a real attempt when
+        // the primary hangs — the dominant failure mode. The current model still
+        // keeps the majority of the budget, and a fast success returns before
+        // its slice is spent, so this only caps pathological latency. The floor
+        // keeps a nearly-exhausted attempt usable rather than sub-second.
+        let remaining_ms = remaining.as_millis().clamp(1, u64::MAX as u128) as u64;
+        let pending_fallbacks = (models.len() - index - 1) as u64;
+        let reserve_ms = FALLBACK_RESERVE_MS.saturating_mul(pending_fallbacks);
+        attempt_limits.timeout_ms = remaining_ms
+            .saturating_sub(reserve_ms)
+            .max(remaining_ms.min(MIN_ATTEMPT_MS));
         let attempt = worker.analyze(
             &WorkerRequest {
                 model: (*model).to_owned(),
@@ -618,5 +639,50 @@ mod tests {
         assert_eq!(result.usage.as_ref().unwrap().total_tokens, Some(24));
         assert_eq!(result.usage.as_ref().unwrap().cost, Some(0.002));
         assert_eq!(*worker.models.lock().unwrap(), ["primary", "fallback"]);
+    }
+
+    /// Records the per-attempt timeout the chain hands each model, then fails, so
+    /// the deadline split can be asserted.
+    struct TimeoutRecordingWorker {
+        timeouts: Mutex<Vec<u64>>,
+    }
+    impl ContextWorker for TimeoutRecordingWorker {
+        fn analyze(&self, request: &WorkerRequest, _: &str) -> Result<WorkerResponse> {
+            self.timeouts.lock().unwrap().push(request.limits.timeout_ms);
+            anyhow::bail!("boom")
+        }
+    }
+
+    /// A slow primary must not consume the whole deadline: the primary's
+    /// attempt is capped so each pending fallback keeps its reserved slice, and
+    /// the last model gets whatever remains.
+    #[test]
+    fn deadline_is_reserved_across_the_fallback_chain() {
+        let worker = TimeoutRecordingWorker {
+            timeouts: Mutex::new(Vec::new()),
+        };
+        let limits = Limits {
+            timeout_ms: 60_000,
+            ..Limits::default()
+        };
+        let _ = analyze_documents(
+            &Credential,
+            &worker,
+            "inspect",
+            &[document(vec![LineRange {
+                start_line: 1,
+                end_line: 3,
+            }])],
+            &limits,
+            "primary",
+            &["fallback".to_owned()],
+        );
+        let timeouts = worker.timeouts.lock().unwrap();
+        assert_eq!(timeouts.len(), 2);
+        // Primary reserves FALLBACK_RESERVE_MS for the one pending fallback, so
+        // it gets at most the deadline minus the reserve (mock fails instantly,
+        // so the fallback then sees nearly the full reserve remaining).
+        assert!(timeouts[0] <= 60_000 - super::FALLBACK_RESERVE_MS);
+        assert!(timeouts[0] >= super::MIN_ATTEMPT_MS);
     }
 }
