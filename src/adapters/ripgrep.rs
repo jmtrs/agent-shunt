@@ -92,6 +92,35 @@ const IDF_SCALE: f64 = 4.0;
 /// so `create-table.png` cannot dominate the way it used to.
 const FILENAME_BOOST: usize = 8;
 
+/// Documentation and prose files match broad natural-language vocabulary, so a
+/// README or CHANGELOG easily outranks the real source for a code question.
+/// This worker is a source-code analyst, so a prose file's score is scaled to
+/// this fraction — enough to sink below matching code, but never to zero, so a
+/// doc-only match still surfaces when nothing else answers the question.
+const PROSE_SCORE_NUM: usize = 1;
+const PROSE_SCORE_DEN: usize = 3;
+
+/// Extensions whose content is prose, not source. Down-weighted, not excluded:
+/// a doc may still be the only evidence for a question about the docs.
+const PROSE_EXTENSIONS: &[&str] = &["md", "mdc", "markdown", "rst", "txt", "adoc", "org"];
+
+/// Extensionless (or any-extension) prose filenames, matched on the stem so
+/// `README`, `README.md`, and `CHANGELOG.rst` are all recognised.
+const PROSE_STEMS: &[&str] = &[
+    "readme",
+    "changelog",
+    "changes",
+    "history",
+    "license",
+    "licence",
+    "authors",
+    "contributors",
+    "contributing",
+    "notice",
+    "copying",
+    "codeowners",
+];
+
 const STOP_WORDS: &[&str] = &[
     "the", "and", "for", "with", "where", "what", "which", "from", "this", "that", "los", "las",
     "una", "uno", "del", "con", "donde", "dónde", "como", "cómo", "que", "qué", "por", "para",
@@ -268,6 +297,14 @@ impl CodeSearch for RipgrepSearch {
             hit.score = filename_boost_of(hit.matched_terms, &term_weight);
         }
         hits.append(&mut filename_raw);
+        // Sink prose below matching source: a README's broad-vocabulary hit
+        // must not lead a code question. Applied to content and filename hits
+        // alike, after all scores are final and before ranking.
+        for hit in &mut hits {
+            if hit.score > 0 && is_prose_path(&hit.path) {
+                hit.score = (hit.score * PROSE_SCORE_NUM / PROSE_SCORE_DEN).max(1);
+            }
+        }
         hits.sort_by(|left, right| {
             right
                 .score
@@ -540,6 +577,23 @@ fn has_binary_extension(path: &str) -> bool {
         .is_some_and(|extension| BINARY_EXTENSIONS.contains(&extension.as_str()))
 }
 
+/// True for documentation/prose files, by extension (`.md`, `.rst`, ...) or by
+/// a well-known stem (`README`, `CHANGELOG`, ...) regardless of extension.
+fn is_prose_path(path: &str) -> bool {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if let Some(extension) = Path::new(&name).extension().and_then(|ext| ext.to_str())
+        && PROSE_EXTENSIONS.contains(&extension)
+    {
+        return true;
+    }
+    let stem = name.split('.').next().unwrap_or(&name);
+    PROSE_STEMS.contains(&stem)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -714,6 +768,20 @@ mod tests {
         assert!(hits.iter().any(|hit| hit.path.contains("src/config.js")));
         assert!(hits.iter().all(|hit| !hit.path.contains("node_modules")));
         assert!(hits.iter().all(|hit| !hit.path.contains(".env")));
+    }
+
+    #[test]
+    fn prose_files_rank_below_matching_code() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/handler.rs"), "fn marker() {}\n").unwrap();
+        // A README matches the same term but must not lead a code question; the
+        // path also sorts before src/ on ties, so only the penalty can reorder.
+        fs::write(root.path().join("README.md"), "The marker section.\n").unwrap();
+        let hits = RipgrepSearch.search(root.path(), "marker", 10, &[]).unwrap();
+        assert_eq!(hits.first().map(|hit| hit.path.as_str()), Some("src/handler.rs"));
+        // Down-weighted, not excluded: the doc still appears.
+        assert!(hits.iter().any(|hit| hit.path == "README.md"));
     }
 
     #[test]
