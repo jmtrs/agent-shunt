@@ -17,7 +17,7 @@ That's the core command. No API key, no network, nothing leaves your machine: it
 
 ## Two paths
 
-**Local and free.** `retrieve` searches your code and returns ranked, line-numbered chunks within a strict token budget. A chunk that doesn't fit is not included — the budget is real.
+**Local and free.** `retrieve` searches your code and returns ranked, line-numbered chunks within a strict token budget. A chunk that doesn't fit is not included — the budget is real. Chunks snap to their enclosing block instead of a fixed line window, near-duplicate and padding lines are dropped, and no single file is allowed to flood the budget — so the evidence stays dense and on-target.
 
 **With a model, optional.** Add `--analyze` (or use `scan` for files you pick explicitly) and the selected evidence goes to a model for synthesis. The model's answer is accepted only if every file and line range it cites was actually part of the evidence sent. Hallucinated references are rejected locally, not trusted.
 
