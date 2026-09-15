@@ -44,9 +44,7 @@ impl OpenAiCompatibleWorker {
         let host = Url::parse(&base_url)
             .ok()
             .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()));
-        let is_openrouter = host
-            .as_deref()
-            .is_some_and(|host| host == "openrouter.ai");
+        let is_openrouter = host.as_deref().is_some_and(|host| host == "openrouter.ai");
         Self {
             base_url,
             is_openrouter,
@@ -158,7 +156,10 @@ const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(5);
 /// worth retrying, or a fatal error to surface immediately.
 enum Attempt {
     Done(WorkerResponse),
-    Retry { after: Option<Duration>, last: anyhow::Error },
+    Retry {
+        after: Option<Duration>,
+        last: anyhow::Error,
+    },
     Fatal(anyhow::Error),
 }
 
@@ -202,8 +203,9 @@ impl ContextWorker for OpenAiCompatibleWorker {
                 }
             }
         }
-        Err(last_error
-            .unwrap_or_else(|| anyhow::anyhow!("worker request failed after {MAX_RETRIES} retries")))
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!("worker request failed after {MAX_RETRIES} retries")
+        }))
     }
 }
 
@@ -271,12 +273,14 @@ impl OpenAiCompatibleWorker {
         let body: Value = match serde_json::from_slice(&bytes) {
             Ok(body) => body,
             Err(_) => {
-                let error =
-                    anyhow::anyhow!("worker returned non-JSON HTTP {}", status.as_u16());
+                let error = anyhow::anyhow!("worker returned non-JSON HTTP {}", status.as_u16());
                 // A malformed body from a transient upstream error (e.g. an HTML
                 // 502 page) is worth retrying; a malformed 2xx is not.
                 return if is_transient_status(status) {
-                    Attempt::Retry { after: retry_after, last: error }
+                    Attempt::Retry {
+                        after: retry_after,
+                        last: error,
+                    }
                 } else {
                     Attempt::Fatal(error)
                 };
@@ -290,7 +294,10 @@ impl OpenAiCompatibleWorker {
                 .unwrap_or("request failed");
             let error = anyhow::anyhow!("worker HTTP {}: {message}", status.as_u16());
             return if is_transient_status(status) {
-                Attempt::Retry { after: retry_after, last: error }
+                Attempt::Retry {
+                    after: retry_after,
+                    last: error,
+                }
             } else {
                 Attempt::Fatal(error)
             };
@@ -527,10 +534,14 @@ mod tests {
     fn transient_status_set() {
         use reqwest::StatusCode;
         for code in [408u16, 429, 500, 502, 503, 504] {
-            assert!(super::is_transient_status(StatusCode::from_u16(code).unwrap()));
+            assert!(super::is_transient_status(
+                StatusCode::from_u16(code).unwrap()
+            ));
         }
         for code in [200u16, 400, 401, 404, 422] {
-            assert!(!super::is_transient_status(StatusCode::from_u16(code).unwrap()));
+            assert!(!super::is_transient_status(
+                StatusCode::from_u16(code).unwrap()
+            ));
         }
     }
 
@@ -584,7 +595,9 @@ mod tests {
 
         let worker =
             OpenAiCompatibleWorker::new(&format!("http://127.0.0.1:{port}/v1"), "json_schema");
-        let response = worker.analyze(&local_request("vendor/model"), "secret").unwrap();
+        let response = worker
+            .analyze(&local_request("vendor/model"), "secret")
+            .unwrap();
         assert_eq!(response.response_model, "stub");
         server.join().unwrap();
     }

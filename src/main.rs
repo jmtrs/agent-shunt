@@ -122,6 +122,11 @@ struct RetrieveArgs {
     /// Exclude paths matching this glob (repeatable); sugar for `--glob '!<pat>'`.
     #[arg(long = "exclude")]
     exclude: Vec<String>,
+    /// Restrict retrieval to locally changed files: tracked modifications
+    /// against this base ref plus untracked files. Bare `--diff` uses HEAD
+    /// (staged and unstaged changes).
+    #[arg(long = "diff", num_args = 0..=1, default_missing_value = "HEAD")]
+    diff: Option<String>,
     #[arg(long)]
     analyze: bool,
 }
@@ -161,6 +166,9 @@ fn run() -> Result<()> {
                 context_lines: args.context_lines,
                 max_hits: args.max_hits,
                 globs,
+                scope: args
+                    .diff
+                    .map(|base| agent_shunt::application::retrieve::ChangeScope { base }),
             };
             app.retrieve(input, args.analyze, &config)?
         }

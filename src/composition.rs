@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use crate::{
     adapters::{
         claude_install::ClaudeInstaller, codex_install::CodexInstaller,
-        credentials::EnvironmentCredentials, filesystem::SecureFilesystem, metrics::JsonlMetrics,
-        openai_compatible::OpenAiCompatibleWorker, ripgrep::RipgrepSearch,
+        credentials::EnvironmentCredentials, filesystem::SecureFilesystem, git::GitChangeSource,
+        metrics::JsonlMetrics, openai_compatible::OpenAiCompatibleWorker, ripgrep::RipgrepSearch,
     },
     application::{
         ports::{CodeSearch, CredentialResolver, HostInstaller, MetricsSink},
@@ -21,6 +21,7 @@ use crate::{
 pub struct Application {
     filesystem: SecureFilesystem,
     search: RipgrepSearch,
+    changes: GitChangeSource,
     metrics: JsonlMetrics,
     codex_installer: CodexInstaller,
     claude_installer: ClaudeInstaller,
@@ -44,6 +45,7 @@ impl Default for Application {
         Self {
             filesystem: SecureFilesystem,
             search: RipgrepSearch,
+            changes: GitChangeSource,
             metrics: JsonlMetrics::new(JsonlMetrics::default_path()),
             codex_installer: CodexInstaller::new(default_executable()),
             claude_installer: ClaudeInstaller::new(default_executable()),
@@ -112,6 +114,7 @@ impl Application {
             let worker = self.worker_for(config);
             retrieve::execute_analyzed(
                 &self.search,
+                &self.changes,
                 &self.filesystem,
                 &credentials,
                 &worker,
@@ -132,7 +135,7 @@ impl Application {
                 })
             })
         } else {
-            retrieve::execute(&self.search, &self.filesystem, &input).and_then(
+            retrieve::execute(&self.search, &self.changes, &self.filesystem, &input).and_then(
                 |(retrieval_result, documents)| {
                     let input_bytes = documents.iter().map(|document| document.bytes).sum();
                     let files = documents.len();
@@ -360,42 +363,6 @@ fn http_status_code(chain: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::classify_error;
-
-    fn kind(message: &str) -> String {
-        classify_error(&anyhow::anyhow!(message.to_owned()))
-    }
-
-    #[test]
-    fn classifies_transport_and_http_statuses() {
-        assert_eq!(kind("worker HTTP 429: rate limited"), "http_4xx");
-        assert_eq!(kind("worker HTTP 503: upstream unavailable"), "http_5xx");
-        assert_eq!(kind("worker request failed"), "transport");
-        assert_eq!(kind("worker returned non-JSON HTTP 200"), "non_json_response");
-        assert_eq!(kind("worker response has no message content"), "empty_content");
-    }
-
-    #[test]
-    fn timeout_recognized_through_wrapped_source() {
-        let wrapped = anyhow::anyhow!("operation timed out")
-            .context("worker request failed");
-        // Timeout must win over the generic transport message it wraps.
-        assert_eq!(classify_error(&wrapped), "timeout");
-    }
-
-    #[test]
-    fn error_kind_never_leaks_paths() {
-        // Filesystem errors carry a path; the classifier must reduce them to a
-        // fixed token so the metrics log stays free of source-derived strings.
-        let leaky = kind("cannot open path: /Users/secret/project/src/auth.rs");
-        assert_eq!(leaky, "other");
-        assert!(!leaky.contains('/'));
-        assert!(!leaky.contains("path"));
-    }
-}
-
 pub fn scan_input(
     question: String,
     paths: Vec<PathBuf>,
@@ -409,5 +376,46 @@ pub fn scan_input(
         model: config.model.clone(),
         fallback_models: config.fallback_models.clone(),
         limits: config.limits.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_error;
+
+    fn kind(message: &str) -> String {
+        classify_error(&anyhow::anyhow!(message.to_owned()))
+    }
+
+    #[test]
+    fn classifies_transport_and_http_statuses() {
+        assert_eq!(kind("worker HTTP 429: rate limited"), "http_4xx");
+        assert_eq!(kind("worker HTTP 503: upstream unavailable"), "http_5xx");
+        assert_eq!(kind("worker request failed"), "transport");
+        assert_eq!(
+            kind("worker returned non-JSON HTTP 200"),
+            "non_json_response"
+        );
+        assert_eq!(
+            kind("worker response has no message content"),
+            "empty_content"
+        );
+    }
+
+    #[test]
+    fn timeout_recognized_through_wrapped_source() {
+        let wrapped = anyhow::anyhow!("operation timed out").context("worker request failed");
+        // Timeout must win over the generic transport message it wraps.
+        assert_eq!(classify_error(&wrapped), "timeout");
+    }
+
+    #[test]
+    fn error_kind_never_leaks_paths() {
+        // Filesystem errors carry a path; the classifier must reduce them to a
+        // fixed token so the metrics log stays free of source-derived strings.
+        let leaky = kind("cannot open path: /Users/secret/project/src/auth.rs");
+        assert_eq!(leaky, "other");
+        assert!(!leaky.contains('/'));
+        assert!(!leaky.contains("path"));
     }
 }

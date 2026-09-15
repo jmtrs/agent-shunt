@@ -110,6 +110,20 @@ pub struct Finding {
     pub summary: String,
 }
 
+/// One locally changed file in the working tree: the changed line ranges in
+/// the current (post-change) version, plus the text of the added lines.
+/// `whole_file` is true only for an untracked (brand-new) file, where no line
+/// restriction applies; a tracked file with empty `hunks` is pure deletions
+/// and must keep every hit unboosted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    pub path: String,
+    pub hunks: Vec<LineRange>,
+    /// True only for untracked files: the entire file is new content.
+    pub whole_file: bool,
+    pub changed_lines: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {

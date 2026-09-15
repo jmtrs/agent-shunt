@@ -3,8 +3,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Result, bail};
 
 use crate::{
-    application::ports::{CodeSearch, ContextWorker, CredentialResolver, DocumentLoader},
-    domain::{Document, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
+    application::ports::{
+        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DocumentLoader,
+    },
+    domain::{Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
 };
 
 #[derive(Debug, Clone)]
@@ -16,13 +18,32 @@ pub struct RetrieveInput {
     pub context_lines: usize,
     pub max_hits: usize,
     pub globs: Vec<String>,
+    /// When set, restricts retrieval to locally changed files so a review
+    /// question covers exactly what the caller touched, not the whole tree.
+    pub scope: Option<ChangeScope>,
 }
+
+/// Restricts retrieval to locally changed files (tracked changes against a
+/// base ref plus untracked files).
+#[derive(Debug, Clone)]
+pub struct ChangeScope {
+    pub base: String,
+}
+
+/// The changed lines' text appended to the question for term extraction is
+/// capped: only enough to name the touched identifiers, never the full diff.
+const MAX_DIFF_TERM_TEXT: usize = 100_000;
+
+/// Hits on changed lines are the subject of a scoped review, so they outrank
+/// other hits from the same files by this factor.
+const SCOPE_HUNK_BOOST: usize = 3;
 
 /// Executes bounded retrieval under a strict evidence token budget: any
 /// retrieved chunk that does not fit the budget is skipped entirely, never
 /// truncated, so selected evidence is always complete source context.
 pub fn execute(
     search: &dyn CodeSearch,
+    change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
@@ -42,11 +63,55 @@ pub fn execute(
     if !search.available() {
         bail!("ripgrep (rg) is required for automatic retrieval");
     }
-    let terms = search.terms(&input.question);
+    let (scope, search_question) = match &input.scope {
+        Some(scope) => {
+            let changes = change_source.changes(&input.cwd, &scope.base)?;
+            if changes.is_empty() {
+                bail!(
+                    "no local changes against {} — nothing to scope the search",
+                    scope.base
+                );
+            }
+            // Changed-line text goes first: term extraction keeps a bounded
+            // number of terms, and in a scoped review the touched identifiers
+            // are what should rank hits, with the question adding intent.
+            let mut question = String::new();
+            for change in &changes {
+                question.push_str(&change.changed_lines);
+                question.push('\n');
+            }
+            question.push_str(&input.question);
+            (
+                Some(changes),
+                question.chars().take(MAX_DIFF_TERM_TEXT).collect(),
+            )
+        }
+        None => (None, input.question.clone()),
+    };
+    let mut globs = input.globs.clone();
+    if let Some(changes) = &scope {
+        // Exact-path include globs keep the search itself inside the scope
+        // instead of diluting the hit limit on out-of-scope files. By design
+        // the scope wins over caller exclude globs: a review must see every
+        // changed file even if a caller exclude would hide it (the built-in
+        // EXCLUDED_GLOBS still apply, so secrets stay out).
+        globs.extend(changes.iter().map(|change| change.path.clone()));
+    }
+    let terms = search.terms(&search_question);
     if terms.is_empty() {
         bail!("question contains no searchable terms");
     }
-    let hits = search.search(&input.cwd, &input.question, input.max_hits, &input.globs)?;
+    let mut hits = search.search(&input.cwd, &search_question, input.max_hits, &globs)?;
+    if let Some(changes) = &scope {
+        hits.retain(|hit| changes.iter().any(|change| change.path == hit.path));
+        for hit in &mut hits {
+            if let Some(change) = changes.iter().find(|change| change.path == hit.path)
+                && hit_in_changed_lines(hit, change)
+            {
+                hit.score = hit.score.saturating_mul(SCOPE_HUNK_BOOST);
+            }
+        }
+    }
     let mut grouped: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
     for hit in hits {
         grouped
@@ -180,8 +245,12 @@ pub fn execute(
     ))
 }
 
+// Wiring requires the full adapter set plus input and model chain; collapsing
+// them into a struct would obscure the call site for no design gain.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_analyzed(
     search: &dyn CodeSearch,
+    change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
@@ -189,7 +258,7 @@ pub fn execute_analyzed(
     model: &str,
     fallback_models: &[String],
 ) -> Result<(ScanResult, usize, bool)> {
-    let (_, documents) = execute(search, loader, input)?;
+    let (_, documents) = execute(search, change_source, loader, input)?;
     if documents.is_empty() {
         bail!("automatic retrieval found no relevant source chunks within the token budget");
     }
@@ -242,25 +311,52 @@ fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+/// A hit counts as inside the change when the file is wholly new (`whole_file`,
+/// untracked) or the hit line falls inside a changed range. A tracked file
+/// whose diff is pure deletions has empty hunks but is *not* whole-file, so
+/// none of its hits get the boost.
+fn hit_in_changed_lines(hit: &crate::domain::SearchHit, change: &FileChange) -> bool {
+    change.whole_file
+        || change.hunks.iter().any(|range| {
+            range.contains(LineRange {
+                start_line: hit.line,
+                end_line: hit.line,
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
 
     use anyhow::Result;
 
     use crate::{
-        application::ports::{CodeSearch, DocumentLoader},
-        domain::{Document, Limits, LineRange, LoadedDocuments, SearchHit},
+        application::ports::{ChangeSource, CodeSearch, DocumentLoader},
+        domain::{Document, FileChange, Limits, LineRange, LoadedDocuments, SearchHit},
     };
 
-    use super::{RetrieveInput, execute};
+    use super::{ChangeScope, RetrieveInput, execute};
 
-    struct Search;
+    struct Search {
+        globs: Mutex<Vec<Vec<String>>>,
+    }
+    impl Search {
+        fn new() -> Self {
+            Self {
+                globs: Mutex::new(Vec::new()),
+            }
+        }
+    }
     impl CodeSearch for Search {
         fn terms(&self, _: &str) -> Vec<String> {
             vec!["needle".to_owned()]
         }
-        fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
+        fn search(&self, _: &Path, _: &str, _: usize, globs: &[String]) -> Result<Vec<SearchHit>> {
+            self.globs.lock().unwrap().push(globs.to_vec());
             Ok(vec![
                 SearchHit {
                     path: "src/a.rs".to_owned(),
@@ -274,10 +370,24 @@ mod tests {
                     score: 1,
                     matched_terms: 1,
                 },
+                SearchHit {
+                    path: "src/out.rs".to_owned(),
+                    line: 1,
+                    score: 5,
+                    matched_terms: 1,
+                },
             ])
         }
         fn available(&self) -> bool {
             true
+        }
+    }
+
+    struct Changes(Vec<FileChange>);
+    impl ChangeSource for Changes {
+        fn changes(&self, _: &Path, base: &str) -> Result<Vec<FileChange>> {
+            assert_eq!(base, "HEAD");
+            Ok(self.0.clone())
         }
     }
 
@@ -304,22 +414,23 @@ mod tests {
         }
     }
 
+    fn input() -> RetrieveInput {
+        RetrieveInput {
+            question: "needle".to_owned(),
+            cwd: PathBuf::from("."),
+            limits: Limits::default(),
+            budget_tokens: 100,
+            context_lines: 1,
+            max_hits: 10,
+            globs: Vec::new(),
+            scope: None,
+        }
+    }
+
     #[test]
     fn merges_overlapping_hits_and_preserves_ranges() {
-        let (result, documents) = execute(
-            &Search,
-            &Loader,
-            &RetrieveInput {
-                question: "needle".to_owned(),
-                cwd: PathBuf::from("."),
-                limits: Limits::default(),
-                budget_tokens: 100,
-                context_lines: 1,
-                max_hits: 10,
-                globs: Vec::new(),
-            },
-        )
-        .unwrap();
+        let (result, documents) =
+            execute(&Search::new(), &Changes(Vec::new()), &Loader, &input()).unwrap();
         assert_eq!(result.chunks.len(), 1);
         assert_eq!(result.chunks[0].start_line, 1);
         assert_eq!(result.chunks[0].end_line, 4);
@@ -329,27 +440,100 @@ mod tests {
     #[test]
     fn budget_is_positive_and_never_exceeded() {
         let base = RetrieveInput {
-            question: "needle".to_owned(),
-            cwd: PathBuf::from("."),
-            limits: Limits::default(),
             budget_tokens: 0,
-            context_lines: 1,
-            max_hits: 10,
-            globs: Vec::new(),
+            ..input()
         };
-        assert!(execute(&Search, &Loader, &base).is_err());
+        assert!(execute(&Search::new(), &Changes(Vec::new()), &Loader, &base).is_err());
 
-        let mut tiny = base.clone();
-        tiny.budget_tokens = 1;
-        let (result, documents) = execute(&Search, &Loader, &tiny).unwrap();
+        let tiny = RetrieveInput {
+            budget_tokens: 1,
+            ..input()
+        };
+        let (result, documents) =
+            execute(&Search::new(), &Changes(Vec::new()), &Loader, &tiny).unwrap();
         assert!(result.chunks.is_empty());
         assert!(documents.is_empty());
         assert_eq!(result.estimated_tokens, 0);
         assert!(result.truncated);
 
-        let mut too_many_hits = base;
-        too_many_hits.budget_tokens = 100;
-        too_many_hits.max_hits = 5_001;
-        assert!(execute(&Search, &Loader, &too_many_hits).is_err());
+        let too_many_hits = RetrieveInput {
+            budget_tokens: 100,
+            max_hits: 5_001,
+            ..input()
+        };
+        assert!(
+            execute(
+                &Search::new(),
+                &Changes(Vec::new()),
+                &Loader,
+                &too_many_hits
+            )
+            .is_err()
+        );
+    }
+
+    fn scoped_change() -> FileChange {
+        FileChange {
+            path: "src/a.rs".to_owned(),
+            hunks: vec![LineRange {
+                start_line: 2,
+                end_line: 2,
+            }],
+            whole_file: false,
+            changed_lines: "needle touched".to_owned(),
+        }
+    }
+
+    #[test]
+    fn scope_filters_out_of_scope_files_and_boosts_changed_lines() {
+        let mut scoped = input();
+        scoped.scope = Some(ChangeScope {
+            base: "HEAD".to_owned(),
+        });
+        let changes = Changes(vec![scoped_change()]);
+        let (result, documents) = execute(&Search::new(), &changes, &Loader, &scoped).unwrap();
+        // The higher-scoring out-of-scope file is gone; only src/a.rs remains.
+        assert!(documents.iter().all(|document| document.path == "src/a.rs"));
+        assert!(result.chunks.iter().all(|chunk| chunk.path == "src/a.rs"));
+        // Both in-file hits merge into one chunk spanning lines 1-4.
+        assert_eq!(result.chunks.len(), 1);
+        assert_eq!(result.query_terms, vec!["needle".to_owned()]);
+    }
+
+    #[test]
+    fn scope_passes_changed_files_as_globs_and_boosts_hunk_hits() {
+        // Compare chunk scores with the hunk on the hit line versus off it:
+        // the in-hunk hit is boosted by SCOPE_HUNK_BOOST.
+        let mut scoped = input();
+        scoped.scope = Some(ChangeScope {
+            base: "HEAD".to_owned(),
+        });
+        let search = Search::new();
+        let (boosted, _) =
+            execute(&search, &Changes(vec![scoped_change()]), &Loader, &scoped).unwrap();
+        let off_hunk = Changes(vec![FileChange {
+            path: "src/a.rs".to_owned(),
+            hunks: vec![LineRange {
+                start_line: 4,
+                end_line: 4,
+            }],
+            whole_file: false,
+            changed_lines: String::new(),
+        }]);
+        let (plain, _) = execute(&search, &off_hunk, &Loader, &scoped).unwrap();
+        assert!(boosted.chunks[0].score > plain.chunks[0].score);
+        // The search itself was narrowed to the changed file via a glob.
+        let globs = search.globs.lock().unwrap();
+        assert_eq!(globs[0], vec!["src/a.rs".to_owned()]);
+    }
+
+    #[test]
+    fn scope_with_no_changes_fails() {
+        let mut scoped = input();
+        scoped.scope = Some(ChangeScope {
+            base: "HEAD".to_owned(),
+        });
+        let error = execute(&Search::new(), &Changes(Vec::new()), &Loader, &scoped).unwrap_err();
+        assert!(error.to_string().contains("no local changes"));
     }
 }

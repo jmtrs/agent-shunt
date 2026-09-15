@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use agent_shunt::{
-    adapters::{filesystem::SecureFilesystem, ripgrep::RipgrepSearch},
+    adapters::{filesystem::SecureFilesystem, git::GitChangeSource, ripgrep::RipgrepSearch},
     application::retrieve::{RetrieveInput, execute},
     domain::Limits,
 };
@@ -23,7 +23,7 @@ fn representative_repository_queries_recover_expected_evidence() {
             ],
         ),
         (
-            "metrics exclude source questions and paths",
+            "metrics log jsonl record privacy sanitize",
             &["src/adapters/metrics.rs"],
         ),
         (
@@ -41,8 +41,12 @@ fn representative_repository_queries_recover_expected_evidence() {
         ),
     ];
     for (question, expected_paths) in cases {
+        // This file embeds every case's question, so without the exclusion it
+        // outranks the real evidence for each query (a perfect self-match).
+        let globs = vec!["!tests/retrieval_evaluation.rs".to_owned()];
         let (result, _) = execute(
             &RipgrepSearch,
+            &GitChangeSource,
             &SecureFilesystem,
             &RetrieveInput {
                 question: (*question).to_owned(),
@@ -51,7 +55,8 @@ fn representative_repository_queries_recover_expected_evidence() {
                 budget_tokens: 1_200,
                 context_lines: 8,
                 max_hits: 40,
-                globs: Vec::new(),
+                globs,
+                scope: None,
             },
         )
         .unwrap_or_else(|error| panic!("evaluation query failed: {question}: {error}"));

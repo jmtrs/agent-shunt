@@ -2,6 +2,7 @@ pub mod claude_install;
 pub mod codex_install;
 pub mod credentials;
 pub mod filesystem;
+pub mod git;
 pub mod host_install;
 pub mod metrics;
 pub mod openai_compatible;

@@ -3,11 +3,18 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    InstallReport, Limits, LoadedDocuments, MetricRecord, SearchHit, WorkerRequest, WorkerResponse,
+    FileChange, InstallReport, Limits, LoadedDocuments, MetricRecord, SearchHit, WorkerRequest,
+    WorkerResponse,
 };
 
 pub trait DocumentLoader {
     fn load(&self, root: &Path, paths: &[PathBuf], limits: &Limits) -> Result<LoadedDocuments>;
+}
+
+/// Reads which files changed locally (tracked modifications against a base
+/// ref plus untracked files), with paths relative to the given root.
+pub trait ChangeSource {
+    fn changes(&self, cwd: &Path, base: &str) -> Result<Vec<FileChange>>;
 }
 
 pub trait CodeSearch {
