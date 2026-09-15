@@ -10,7 +10,7 @@ use anyhow::Result;
 use shell_words::quote;
 
 use crate::{
-    adapters::host_install::{HostConfig, install_homes},
+    adapters::host_install::{HookSpec, HostConfig, install_homes},
     application::ports::HostInstaller,
     domain::InstallReport,
 };
@@ -33,15 +33,18 @@ impl CodexInstaller {
     fn config(&self) -> HostConfig {
         HostConfig {
             label: "Codex",
-            hook_file: "hooks.json",
-            hook_command: format!(
-                "{} hook codex-pre-tool-use",
-                quote(&self.executable.to_string_lossy())
-            ),
-            owned_suffix: HOOK_SUFFIX,
-            matcher: "*",
-            timeout_secs: 2,
-            handler_extra: Some(("statusMessage", STATUS_MESSAGE)),
+            hook: Some(HookSpec {
+                hook_file: "hooks.json",
+                hook_command: format!(
+                    "{} hook codex-pre-tool-use",
+                    quote(&self.executable.to_string_lossy())
+                ),
+                owned_suffix: HOOK_SUFFIX,
+                matcher: "*",
+                timeout_secs: 2,
+                handler_extra: Some(("statusMessage", STATUS_MESSAGE)),
+                requires_hook_trust: true,
+            }),
             skill_files: vec![
                 (
                     Path::new("skills/agent-shunt/SKILL.md").to_path_buf(),
@@ -54,7 +57,6 @@ impl CodexInstaller {
                     0o644,
                 ),
             ],
-            requires_hook_trust: true,
         }
     }
 }

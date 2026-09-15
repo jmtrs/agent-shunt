@@ -16,21 +16,28 @@ use serde_json::{Value, json};
 
 use crate::domain::InstallReport;
 
-/// Per-host installer description. `hook_file` is merged (never replaced),
-/// with our handlers recognized by `owned_suffix` at the end of their
-/// command. `handler_extra` adds host-specific handler keys (Codex uses
-/// `statusMessage`). `requires_hook_trust` marks hosts that need an explicit
-/// trust step in their UI after a hook change (Codex `/hooks`).
-pub(crate) struct HostConfig {
-    pub label: &'static str,
+/// Hook wiring for hosts that support a PreToolUse guardrail. `hook_file` is
+/// merged (never replaced), with our handlers recognized by `owned_suffix` at
+/// the end of their command. `handler_extra` adds host-specific handler keys
+/// (Codex uses `statusMessage`). `requires_hook_trust` marks hosts that need
+/// an explicit trust step in their UI after a hook change (Codex `/hooks`).
+pub(crate) struct HookSpec {
     pub hook_file: &'static str,
     pub hook_command: String,
     pub owned_suffix: &'static str,
     pub matcher: &'static str,
     pub timeout_secs: u64,
     pub handler_extra: Option<(&'static str, &'static str)>,
-    pub skill_files: Vec<(PathBuf, &'static [u8], u32)>,
     pub requires_hook_trust: bool,
+}
+
+/// Per-host installer description: where the skill files go, and the optional
+/// PreToolUse hook wiring. Hosts without hook support (Gemini CLI, opencode)
+/// install skills only.
+pub(crate) struct HostConfig {
+    pub label: &'static str,
+    pub hook: Option<HookSpec>,
+    pub skill_files: Vec<(PathBuf, &'static [u8], u32)>,
 }
 
 struct HookPlan {
@@ -38,9 +45,28 @@ struct HookPlan {
     changed: bool,
 }
 
+/// Prior state of an install target. `Unreadable` is kept distinct from
+/// `Absent` so rollback never deletes a file it could not read: treating a
+/// mode-000 or I/O-error file as "did not exist" would destroy it.
+pub(crate) enum PriorState {
+    Absent,
+    Bytes(Vec<u8>),
+    Unreadable,
+}
+
+impl PriorState {
+    pub(crate) fn probe(path: &Path) -> Self {
+        match fs::read(path) {
+            Ok(content) => Self::Bytes(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(_) => Self::Unreadable,
+        }
+    }
+}
+
 struct Snapshot {
     path: PathBuf,
-    content: Option<Vec<u8>>,
+    state: PriorState,
     mode: u32,
 }
 
@@ -60,7 +86,7 @@ pub(crate) fn install_homes(
         .iter()
         .flat_map(|home| target_paths(home, hook, config))
         .map(|(path, mode)| Snapshot {
-            content: fs::read(&path).ok(),
+            state: PriorState::probe(&path),
             path,
             mode,
         })
@@ -84,8 +110,8 @@ fn target_paths(home: &Path, hook: bool, config: &HostConfig) -> Vec<(PathBuf, u
         .iter()
         .map(|(relative, _, mode)| (home.join(relative), *mode))
         .collect::<Vec<_>>();
-    if hook {
-        paths.push((home.join(config.hook_file), 0o600));
+    if hook && let Some(spec) = &config.hook {
+        paths.push((home.join(spec.hook_file), 0o600));
     }
     paths
 }
@@ -94,8 +120,10 @@ fn preflight_home(home: &Path, hook: bool, config: &HostConfig) -> Result<Option
     if !home.is_dir() {
         bail!("{} home does not exist: {}", config.label, home.display());
     }
-    hook.then(|| plan_hook(&home.join(config.hook_file), config))
-        .transpose()
+    if hook && let Some(spec) = &config.hook {
+        return plan_hook(&home.join(spec.hook_file), spec).map(Some);
+    }
+    Ok(None)
 }
 
 fn install_home(
@@ -111,9 +139,9 @@ fn install_home(
         }
         skill_changed |= install_owned_file(&path, content, *mode)?;
     }
-    let hook_path = home.join(config.hook_file);
-    let (hook_changed, hook_backup) = match hook_plan {
-        Some(plan) if plan.changed => {
+    let (hook_changed, hook_backup) = match (&config.hook, hook_plan) {
+        (Some(spec), Some(plan)) if plan.changed => {
+            let hook_path = home.join(spec.hook_file);
             let backup = backup_existing(&hook_path)?;
             atomic_write(&hook_path, &plan.encoded, 0o600)?;
             (true, backup)
@@ -125,14 +153,18 @@ fn install_home(
         skill_changed,
         hook_changed,
         hook_backup,
-        requires_hook_trust: hook_changed && config.requires_hook_trust,
+        requires_hook_trust: hook_changed
+            && config
+                .hook
+                .as_ref()
+                .is_some_and(|spec| spec.requires_hook_trust),
     })
 }
 
 /// Merges our handler into the host's hook configuration, preserving every
 /// unrelated key, group, and handler. Our existing handlers are replaced in
 /// place; a fresh group is appended only when none of ours is present.
-fn plan_hook(path: &Path, config: &HostConfig) -> Result<HookPlan> {
+fn plan_hook(path: &Path, spec: &HookSpec) -> Result<HookPlan> {
     let existing = if path.exists() {
         fs::read(path).with_context(|| format!("cannot read {}", path.display()))?
     } else {
@@ -153,7 +185,7 @@ fn plan_hook(path: &Path, config: &HostConfig) -> Result<HookPlan> {
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .context("PreToolUse must be an array")?;
-    let handler = fresh_handler(config);
+    let handler = fresh_handler(spec);
     let mut found = false;
     for group in groups.iter_mut() {
         let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -163,7 +195,7 @@ fn plan_hook(path: &Path, config: &HostConfig) -> Result<HookPlan> {
             let owned = target
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(|value| value.ends_with(config.owned_suffix));
+                .is_some_and(|value| value.ends_with(spec.owned_suffix));
             if owned {
                 *target = handler.clone();
                 found = true;
@@ -172,7 +204,7 @@ fn plan_hook(path: &Path, config: &HostConfig) -> Result<HookPlan> {
     }
     if !found {
         groups.push(json!({
-            "matcher": config.matcher,
+            "matcher": spec.matcher,
             "hooks": [handler]
         }));
     }
@@ -183,19 +215,19 @@ fn plan_hook(path: &Path, config: &HostConfig) -> Result<HookPlan> {
     })
 }
 
-fn fresh_handler(config: &HostConfig) -> Value {
+fn fresh_handler(spec: &HookSpec) -> Value {
     let mut handler = json!({
         "type": "command",
-        "command": config.hook_command,
-        "timeout": config.timeout_secs
+        "command": spec.hook_command,
+        "timeout": spec.timeout_secs
     });
-    if let Some((key, value)) = config.handler_extra {
+    if let Some((key, value)) = spec.handler_extra {
         handler[key] = json!(value);
     }
     handler
 }
 
-fn backup_existing(path: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn backup_existing(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -224,42 +256,55 @@ fn install_owned_file(path: &Path, content: &[u8], mode: u32) -> Result<bool> {
 
 fn rollback(snapshots: &[Snapshot]) {
     for snapshot in snapshots.iter().rev() {
-        match &snapshot.content {
-            Some(content) => {
+        match &snapshot.state {
+            PriorState::Bytes(content) => {
                 let _ = atomic_write(&snapshot.path, content, snapshot.mode);
             }
-            None => {
+            PriorState::Absent => {
                 if snapshot.path.is_file() {
                     let _ = fs::remove_file(&snapshot.path);
                 }
             }
+            // Never delete a target we could not read: it existed, we just
+            // could not capture it.
+            PriorState::Unreadable => {}
         }
     }
 }
 
-fn atomic_write(path: &Path, content: &[u8], mode: u32) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &[u8], mode: u32) -> Result<()> {
     let parent = path.parent().context("destination has no parent")?;
     fs::create_dir_all(parent)?;
+    static WRITE_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let temporary = parent.join(format!(
-        ".agent-shunt-{}-{}.tmp",
+        ".agent-shunt-{}-{}-{}.tmp",
         std::process::id(),
+        WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("file")
     ));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(mode);
+    let write = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        // A half-written temporary file must not linger in a repository
+        // working tree; best-effort cleanup.
+        let _ = fs::remove_file(&temporary);
     }
-    let mut file = options.open(&temporary)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temporary, path)?;
-    Ok(())
+    write
 }
 
 #[cfg(test)]
@@ -269,24 +314,46 @@ mod tests {
     use serde_json::Value;
     use tempfile::tempdir;
 
-    use super::{HostConfig, install_homes};
+    use super::{HookSpec, HostConfig, install_homes};
 
     fn config(matcher: &'static str, extra: Option<(&'static str, &'static str)>) -> HostConfig {
         HostConfig {
             label: "TestHost",
-            hook_file: "hooks.json",
-            hook_command: "/bin/agent-shunt hook test-pre-tool-use".to_owned(),
-            owned_suffix: " hook test-pre-tool-use",
-            matcher,
-            timeout_secs: 5,
-            handler_extra: extra,
+            hook: Some(HookSpec {
+                hook_file: "hooks.json",
+                hook_command: "/bin/agent-shunt hook test-pre-tool-use".to_owned(),
+                owned_suffix: " hook test-pre-tool-use",
+                matcher,
+                timeout_secs: 5,
+                handler_extra: extra,
+                requires_hook_trust: true,
+            }),
             skill_files: vec![(
                 std::path::PathBuf::from("skills/agent-shunt/SKILL.md"),
                 b"# skill\n".as_slice(),
                 0o644,
             )],
-            requires_hook_trust: true,
         }
+    }
+
+    #[test]
+    fn hookless_host_installs_skills_only() {
+        let root = tempdir().unwrap();
+        let config = HostConfig {
+            label: "Hookless",
+            hook: None,
+            skill_files: vec![(
+                std::path::PathBuf::from("commands/agent-shunt.txt"),
+                b"command\n".as_slice(),
+                0o644,
+            )],
+        };
+        // `hook: true` must not invent a hook for a host with no spec.
+        let reports = install_homes(&[root.path().to_path_buf()], true, &config).unwrap();
+        assert!(reports[0].skill_changed);
+        assert!(!reports[0].hook_changed);
+        assert!(root.path().join("commands/agent-shunt.txt").is_file());
+        assert!(!root.path().join("hooks.json").exists());
     }
 
     #[test]

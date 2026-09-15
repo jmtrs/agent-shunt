@@ -79,6 +79,56 @@ enum InstallCommand {
         #[arg(long = "home")]
         homes: Vec<PathBuf>,
     },
+    Gemini {
+        /// Gemini CLI home to install into; repeatable. Defaults to
+        /// ~/.gemini. The host has no hook surface: only the custom command
+        /// is installed.
+        #[arg(long = "home")]
+        homes: Vec<PathBuf>,
+    },
+    Opencode {
+        /// opencode home to install into; repeatable. Defaults to
+        /// ~/.config/opencode. The host has no hook surface: only the skill
+        /// is installed.
+        #[arg(long = "home")]
+        homes: Vec<PathBuf>,
+    },
+    /// Append the agent-shunt section to AGENTS.md in a repository root.
+    AgentsMd {
+        /// Repository root to install into. Defaults to the current
+        /// directory.
+        #[arg(long = "root", default_value = ".")]
+        root: PathBuf,
+    },
+    /// Install the .cursor/rules/agent-shunt.mdc rule into a repository root.
+    Cursor {
+        /// Repository root to install into. Defaults to the current
+        /// directory.
+        #[arg(long = "root", default_value = ".")]
+        root: PathBuf,
+    },
+    /// Install the .clinerules/agent-shunt.md rule into a repository root.
+    Cline {
+        /// Repository root to install into. Defaults to the current
+        /// directory.
+        #[arg(long = "root", default_value = ".")]
+        root: PathBuf,
+    },
+    /// Install the .roo/rules/agent-shunt.md rule into a repository root.
+    Roo {
+        /// Repository root to install into. Defaults to the current
+        /// directory.
+        #[arg(long = "root", default_value = ".")]
+        root: PathBuf,
+    },
+    /// Append the agent-shunt section to .github/copilot-instructions.md in
+    /// a repository root.
+    Copilot {
+        /// Repository root to install into. Defaults to the current
+        /// directory.
+        #[arg(long = "root", default_value = ".")]
+        root: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -208,6 +258,37 @@ fn run() -> Result<()> {
                     };
                 }
                 app.install_claude(&homes, hook)?
+            }
+            InstallCommand::Gemini { mut homes } => {
+                if homes.is_empty() {
+                    let home = dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+                    homes = vec![home.join(".gemini")];
+                }
+                app.install_gemini(&homes, false)?
+            }
+            InstallCommand::Opencode { mut homes } => {
+                if homes.is_empty() {
+                    let home = dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+                    homes = vec![home.join(".config").join("opencode")];
+                }
+                app.install_opencode(&homes, false)?
+            }
+            InstallCommand::AgentsMd { root } => {
+                app.install_repo(agent_shunt::composition::RepoHost::AgentsMd, &root)?
+            }
+            InstallCommand::Cursor { root } => {
+                app.install_repo(agent_shunt::composition::RepoHost::Cursor, &root)?
+            }
+            InstallCommand::Cline { root } => {
+                app.install_repo(agent_shunt::composition::RepoHost::Cline, &root)?
+            }
+            InstallCommand::Roo { root } => {
+                app.install_repo(agent_shunt::composition::RepoHost::Roo, &root)?
+            }
+            InstallCommand::Copilot { root } => {
+                app.install_repo(agent_shunt::composition::RepoHost::Copilot, &root)?
             }
         },
         Some(Command::Hook { command }) => match command {

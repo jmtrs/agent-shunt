@@ -143,16 +143,32 @@ Run `agent-shunt recommend` for ready-to-merge config fragments. The task is gro
 
 ## Host integrations
 
-Two hosts have first-class installers today:
+Skill-based hosts (instructions installed into the agent's home):
 
 ```bash
-agent-shunt install claude --hook   # Claude Code  (~/.claude)
-agent-shunt install codex --hook    # Codex       (~/.codex)
+agent-shunt install claude --hook    # Claude Code  (~/.claude): skill + guardrail hook
+agent-shunt install codex --hook     # Codex       (~/.codex):  skill + guardrail hook
+agent-shunt install gemini           # Gemini CLI  (~/.gemini): /agent-shunt custom command
+agent-shunt install opencode         # opencode    (~/.config/opencode): skill
 ```
 
-Each drops a consultative skill into the host's skills directory and merges a fail-open guardrail into its hook config — `settings.json` for Claude Code, `hooks.json` for Codex. Whole-file reads above 32 KiB (`Read`/`Bash cat`) get redirected through the shunt with the reason inline; ranged reads and everything else pass untouched. Your existing settings, permissions, and hooks are preserved (a `.agent-shunt.bak` backup is made before any change), re-running is idempotent, and if any home fails, all homes roll back. Multiple homes via repeatable `--home` or the `codexHomes`/`claudeHomes` config keys. After a hook change, Codex asks you to re-trust it via `/hooks`; Claude Code needs nothing else.
+Claude Code and Codex each merge a fail-open guardrail into their hook config — `settings.json` and `hooks.json` respectively. Whole-file reads above 32 KiB (`Read`/`Bash cat`) get redirected through the shunt with the reason inline; ranged reads and everything else pass untouched. After a hook change, Codex asks you to re-trust it via `/hooks`; after a Gemini command install, run `/commands reload`. Multiple homes via repeatable `--home` (Claude/Codex also honor the `claudeHomes`/`codexHomes` config keys).
 
-**Any other agent.** The CLI is plain shell — any tool that can run commands (Gemini CLI, OpenCode, Cursor, …) can use it directly; paste the skill's two commands into its instructions. New hosts are a thin config on the same installer core, so more first-class integrations land without restructuring.
+Repo-based hosts (instruction files installed into a repository root, default `.`):
+
+```bash
+agent-shunt install agents-md        # AGENTS.md (Codex, Amp, Zed, Droid, Jules, …)
+agent-shunt install cursor           # .cursor/rules/agent-shunt.mdc
+agent-shunt install cline            # .clinerules/agent-shunt.md
+agent-shunt install roo              # .roo/rules/agent-shunt.md
+agent-shunt install copilot          # .github/copilot-instructions.md
+```
+
+`AGENTS.md` and `.github/copilot-instructions.md` usually hold your own content, so the installer appends a managed section between `agent-shunt` markers — re-running replaces only that section, never your lines. The Cursor/Cline/Roo rule files are ours alone and land next to your existing rules.
+
+Every installer is transactional: your existing files are preserved (a `.agent-shunt.bak` backup sits beside any file before it is first touched), re-running is idempotent, and any failure rolls back all writes.
+
+**Any other agent.** The CLI is plain shell — any tool that can run commands can use it directly; paste the skill's two commands into its instructions. New hosts are a thin config on the same installer core, so more first-class integrations land without restructuring.
 
 ## License
 

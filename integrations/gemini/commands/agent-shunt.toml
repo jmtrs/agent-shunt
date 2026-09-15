@@ -1,0 +1,23 @@
+description = "Retrieve and analyze bounded code context with the local agent-shunt CLI"
+prompt = """
+Use the agent-shunt CLI for broad code questions instead of reading whole files.
+
+First run deterministic retrieval:
+
+agent-shunt retrieve --question "<the task or question>" --dir "<repository root>"
+
+Inspect the returned line-numbered chunks. Treat ranking and prose as hints; source ranges are evidence.
+
+When the selected context still needs synthesis, add --analyze to get a low-cost worker summary whose file and line references are locally validated:
+
+agent-shunt retrieve --analyze --question "<the task or question>" --dir "<repository root>"
+
+Use scan only for explicitly chosen files:
+
+agent-shunt scan --path <file> --question "<what to extract>"
+
+Rules:
+- Use normal grep and ranged reads when the exact file, symbol, or line range is already known; never replace a small targeted read with the shunt.
+- Do not pass secrets, generated artifacts, databases, binaries, or unrelated files.
+- If retrieval finds no useful evidence, every worker model fails, or the CLI is unavailable, continue with normal targeted repository reads. Do not block the task and do not claim model output is verified beyond its locally validated references.
+"""

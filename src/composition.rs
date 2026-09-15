@@ -6,8 +6,10 @@ use serde_json::{Value, json};
 use crate::{
     adapters::{
         claude_install::ClaudeInstaller, codex_install::CodexInstaller,
-        credentials::EnvironmentCredentials, filesystem::SecureFilesystem, git::GitChangeSource,
-        metrics::JsonlMetrics, openai_compatible::OpenAiCompatibleWorker, ripgrep::RipgrepSearch,
+        credentials::EnvironmentCredentials, filesystem::SecureFilesystem,
+        gemini_install::GeminiInstaller, git::GitChangeSource, metrics::JsonlMetrics,
+        openai_compatible::OpenAiCompatibleWorker, opencode_install::OpencodeInstaller,
+        repo_install::RepoInstaller, ripgrep::RipgrepSearch,
     },
     application::{
         ports::{CodeSearch, CredentialResolver, HostInstaller, MetricsSink},
@@ -18,6 +20,15 @@ use crate::{
     domain::{MetricRecord, Usage},
 };
 
+/// Repo-level instruction host selected on the `install` subcommand.
+pub enum RepoHost {
+    AgentsMd,
+    Copilot,
+    Cursor,
+    Cline,
+    Roo,
+}
+
 pub struct Application {
     filesystem: SecureFilesystem,
     search: RipgrepSearch,
@@ -25,6 +36,9 @@ pub struct Application {
     metrics: JsonlMetrics,
     codex_installer: CodexInstaller,
     claude_installer: ClaudeInstaller,
+    gemini_installer: GeminiInstaller,
+    opencode_installer: OpencodeInstaller,
+    repo_installer: RepoInstaller,
 }
 
 struct RecordedResult {
@@ -49,6 +63,9 @@ impl Default for Application {
             metrics: JsonlMetrics::new(JsonlMetrics::default_path()),
             codex_installer: CodexInstaller::new(default_executable()),
             claude_installer: ClaudeInstaller::new(default_executable()),
+            gemini_installer: GeminiInstaller,
+            opencode_installer: OpencodeInstaller,
+            repo_installer: RepoInstaller,
         }
     }
 }
@@ -258,6 +275,29 @@ impl Application {
         Ok(serde_json::to_value(
             self.claude_installer.install(homes, hook)?,
         )?)
+    }
+
+    pub fn install_gemini(&self, homes: &[PathBuf], hook: bool) -> Result<Value> {
+        Ok(serde_json::to_value(
+            self.gemini_installer.install(homes, hook)?,
+        )?)
+    }
+
+    pub fn install_opencode(&self, homes: &[PathBuf], hook: bool) -> Result<Value> {
+        Ok(serde_json::to_value(
+            self.opencode_installer.install(homes, hook)?,
+        )?)
+    }
+
+    pub fn install_repo(&self, host: RepoHost, root: &std::path::Path) -> Result<Value> {
+        let report = match host {
+            RepoHost::AgentsMd => self.repo_installer.install_agents_md(root),
+            RepoHost::Copilot => self.repo_installer.install_copilot(root),
+            RepoHost::Cursor => self.repo_installer.install_cursor(root),
+            RepoHost::Cline => self.repo_installer.install_cline(root),
+            RepoHost::Roo => self.repo_installer.install_roo(root),
+        }?;
+        Ok(serde_json::to_value(report)?)
     }
 
     fn record_result(

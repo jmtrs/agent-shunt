@@ -12,7 +12,7 @@ use anyhow::Result;
 use shell_words::quote;
 
 use crate::{
-    adapters::host_install::{HostConfig, install_homes},
+    adapters::host_install::{HookSpec, HostConfig, install_homes},
     application::ports::HostInstaller,
     domain::InstallReport,
 };
@@ -32,21 +32,23 @@ impl ClaudeInstaller {
     fn config(&self) -> HostConfig {
         HostConfig {
             label: "Claude Code",
-            hook_file: "settings.json",
-            hook_command: format!(
-                "{} hook claude-pre-tool-use",
-                quote(&self.executable.to_string_lossy())
-            ),
-            owned_suffix: HOOK_SUFFIX,
-            matcher: "Read|Bash",
-            timeout_secs: 10,
-            handler_extra: None,
+            hook: Some(HookSpec {
+                hook_file: "settings.json",
+                hook_command: format!(
+                    "{} hook claude-pre-tool-use",
+                    quote(&self.executable.to_string_lossy())
+                ),
+                owned_suffix: HOOK_SUFFIX,
+                matcher: "Read|Bash",
+                timeout_secs: 10,
+                handler_extra: None,
+                requires_hook_trust: false,
+            }),
             skill_files: vec![(
                 Path::new("skills/agent-shunt/SKILL.md").to_path_buf(),
                 SKILL.as_bytes(),
                 0o644,
             )],
-            requires_hook_trust: false,
         }
     }
 }

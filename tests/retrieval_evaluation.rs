@@ -41,9 +41,14 @@ fn representative_repository_queries_recover_expected_evidence() {
         ),
     ];
     for (question, expected_paths) in cases {
-        // This file embeds every case's question, so without the exclusion it
-        // outranks the real evidence for each query (a perfect self-match).
-        let globs = vec!["!tests/retrieval_evaluation.rs".to_owned()];
+        // This file embeds every case's question, and the integration
+        // templates embed its vocabulary (validate, ranges, retrieve), so
+        // without the exclusions both outrank the real evidence for each
+        // query (perfect self-matches).
+        let globs = vec![
+            "!tests/retrieval_evaluation.rs".to_owned(),
+            "!integrations/**".to_owned(),
+        ];
         let (result, _) = execute(
             &RipgrepSearch,
             &GitChangeSource,
