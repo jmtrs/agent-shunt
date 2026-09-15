@@ -32,6 +32,8 @@ enum Command {
     Doctor(ModelArgs),
     /// Show aggregate local metrics without source data.
     Metrics,
+    /// Print recommended worker models with ready-to-use config fragments.
+    Recommend,
     /// Install host integrations with backups and merge-safe configuration.
     Install {
         #[command(subcommand)]
@@ -171,6 +173,7 @@ fn run() -> Result<()> {
             app.doctor(&config)
         }
         Some(Command::Metrics) => app.metrics()?,
+        Some(Command::Recommend) => app.recommend(),
         Some(Command::Install { command }) => match command {
             InstallCommand::Codex { hook, mut homes } => {
                 if homes.is_empty() {

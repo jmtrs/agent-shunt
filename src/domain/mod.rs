@@ -98,8 +98,11 @@ pub struct RetrieveResult {
     pub truncated: bool,
 }
 
+// No `deny_unknown_fields`: a worker in `json_object` mode may attach extra
+// keys to a finding. They are ignored on read; the path and line range are
+// validated separately in `validate_worker_result`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub path: String,
     pub start_line: usize,
@@ -195,6 +198,12 @@ pub struct MetricRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
     pub fallback: bool,
+    /// Stable failure category on `success == false` (e.g. `http_5xx`,
+    /// `timeout`, `fallback_exhausted`). A fixed token, never a raw error
+    /// message, so no source path or content can leak into the metrics log.
+    /// Absent (and `default` on read) for successful runs and legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

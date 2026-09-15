@@ -53,7 +53,12 @@ impl Default for Application {
 
 impl Application {
     fn worker_for(&self, config: &Config) -> OpenAiCompatibleWorker {
-        OpenAiCompatibleWorker::new(&config.base_url, &config.response_format)
+        OpenAiCompatibleWorker::with_options(
+            &config.base_url,
+            &config.response_format,
+            config.disable_reasoning,
+            config.extra_body.clone(),
+        )
     }
 
     fn credentials_for(&self, config: &Config) -> EnvironmentCredentials {
@@ -193,6 +198,53 @@ impl Application {
         }))
     }
 
+    /// Curated worker models for this tool's job: grounded, structured
+    /// extraction over supplied chunks — cheap, fast, reliable JSON, and
+    /// faithful to the exact line ranges shown. Reasoning is unnecessary here,
+    /// so reasoning models are only listed with `disableReasoning` set. Each
+    /// entry carries a ready-to-merge `config` fragment.
+    pub fn recommend(&self) -> Value {
+        json!({
+            "version": 1,
+            "note": "Set these keys in the config file (default ~/.config/agent-shunt/config.json). `config` fragments are additive. `disableReasoning` auto-injects the provider's disable-thinking parameter; `extraBody` overrides any request field for models the built-in handling does not cover.",
+            "criteria": [
+                "reliable structured output (json_schema or json_object)",
+                "faithful line ranges (findings must cite only supplied lines)",
+                "low latency and cost; reasoning adds neither value nor speed here"
+            ],
+            "recommended": [
+                {
+                    "model": "deepseek/deepseek-v4-flash",
+                    "tested": true,
+                    "privacy": "zdr (OpenRouter routes with zero data retention / no training)",
+                    "notes": "Default. Fast (~22s), cheap (~$0.0004), valid json_schema, respects line ranges.",
+                    "config": {"baseUrl": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4-flash", "responseFormat": "json_schema"}
+                },
+                {
+                    "model": "z-ai/glm-4.7-flash",
+                    "tested": true,
+                    "privacy": "zdr (OpenRouter)",
+                    "notes": "Default fallback. Works with json_schema; occasional provider 429 and stricter line-range failures fall back automatically.",
+                    "config": {"baseUrl": "https://openrouter.ai/api/v1", "model": "z-ai/glm-4.7-flash", "responseFormat": "json_schema"}
+                },
+                {
+                    "model": "glm-5.3-flash (z.ai coding plan)",
+                    "tested": true,
+                    "privacy": "none — source leaves to z.ai (no zdr guarantee); avoid for proprietary code",
+                    "notes": "Fast (~3.4s) ONLY with reasoning disabled; otherwise it burns the token budget and truncates JSON. Uses json_object (z.ai does not enforce strict json_schema).",
+                    "config": {"baseUrl": "https://api.z.ai/api/coding/paas/v4", "model": "glm-5.3-flash", "responseFormat": "json_object", "disableReasoning": true, "maxOutputTokens": 8192}
+                },
+                {
+                    "model": "local (Ollama / LM Studio / vLLM)",
+                    "tested": false,
+                    "privacy": "full — nothing leaves the machine",
+                    "notes": "Any capable instruct model served locally. No API key required. Use json_object; disableReasoning for reasoning models.",
+                    "config": {"baseUrl": "http://localhost:11434/v1", "model": "<your-local-model>", "responseFormat": "json_object"}
+                }
+            ]
+        })
+    }
+
     pub fn install_codex(&self, homes: &[PathBuf], hook: bool) -> Result<Value> {
         Ok(serde_json::to_value(
             self.codex_installer.install(homes, hook)?,
@@ -212,7 +264,7 @@ impl Application {
         started: Instant,
         result: &Result<RecordedResult>,
     ) {
-        let (success, input_bytes, files, usage, used_model, fallback) = match result {
+        let (success, input_bytes, files, usage, used_model, fallback, error_kind) = match result {
             Ok(result) => (
                 true,
                 result.input_bytes,
@@ -220,6 +272,7 @@ impl Application {
                 result.usage.as_ref(),
                 result.model.as_deref().or(model),
                 result.fallback,
+                None,
             ),
             Err(error) => {
                 let exhausted = error.downcast_ref::<scan::FallbackExhausted>();
@@ -230,6 +283,7 @@ impl Application {
                     exhausted.and_then(|value| value.usage()),
                     model,
                     exhausted.is_some(),
+                    Some(classify_error(error)),
                 )
             }
         };
@@ -246,8 +300,99 @@ impl Application {
             total_tokens: usage.and_then(|value| value.total_tokens),
             cost: usage.and_then(|value| value.cost),
             fallback,
+            error_kind,
         };
         let _ = self.metrics.record(&metric);
+    }
+}
+
+/// Reduces a failure to a stable, privacy-safe category for the metrics log.
+/// Matches over the whole error chain (so a wrapped transport/timeout source is
+/// still recognized) but returns only a fixed token — never the raw message —
+/// so no source path or content is ever persisted. Keep the tokens stable:
+/// they are aggregated across runs.
+fn classify_error(error: &anyhow::Error) -> String {
+    if error.downcast_ref::<scan::FallbackExhausted>().is_some() {
+        return "fallback_exhausted".to_owned();
+    }
+    let chain = error
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
+        .to_ascii_lowercase();
+    let kind = if chain.contains("timed out") || chain.contains("timeout") {
+        "timeout"
+    } else if let Some(code) = http_status_code(&chain) {
+        match code / 100 {
+            4 => "http_4xx",
+            5 => "http_5xx",
+            _ => "http_other",
+        }
+    } else if chain.contains("worker request failed") || chain.contains("error sending request") {
+        "transport"
+    } else if chain.contains("non-json") {
+        "non_json_response"
+    } else if chain.contains("no message content") {
+        "empty_content"
+    } else if chain.contains("free model routes") {
+        "free_route_blocked"
+    } else if chain.contains("exceeds") {
+        "size_limit"
+    } else if chain.contains("credential") || chain.contains("api key") {
+        "credential"
+    } else if chain.contains("no relevant source") {
+        "no_results"
+    } else {
+        "other"
+    };
+    kind.to_owned()
+}
+
+/// Extracts the numeric status from a `worker HTTP <code>` message, if present.
+fn http_status_code(chain: &str) -> Option<u16> {
+    let rest = chain.split("worker http ").nth(1)?;
+    let digits = rest
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_error;
+
+    fn kind(message: &str) -> String {
+        classify_error(&anyhow::anyhow!(message.to_owned()))
+    }
+
+    #[test]
+    fn classifies_transport_and_http_statuses() {
+        assert_eq!(kind("worker HTTP 429: rate limited"), "http_4xx");
+        assert_eq!(kind("worker HTTP 503: upstream unavailable"), "http_5xx");
+        assert_eq!(kind("worker request failed"), "transport");
+        assert_eq!(kind("worker returned non-JSON HTTP 200"), "non_json_response");
+        assert_eq!(kind("worker response has no message content"), "empty_content");
+    }
+
+    #[test]
+    fn timeout_recognized_through_wrapped_source() {
+        let wrapped = anyhow::anyhow!("operation timed out")
+            .context("worker request failed");
+        // Timeout must win over the generic transport message it wraps.
+        assert_eq!(classify_error(&wrapped), "timeout");
+    }
+
+    #[test]
+    fn error_kind_never_leaks_paths() {
+        // Filesystem errors carry a path; the classifier must reduce them to a
+        // fixed token so the metrics log stays free of source-derived strings.
+        let leaky = kind("cannot open path: /Users/secret/project/src/auth.rs");
+        assert_eq!(leaky, "other");
+        assert!(!leaky.contains('/'));
+        assert!(!leaky.contains("path"));
     }
 }
 

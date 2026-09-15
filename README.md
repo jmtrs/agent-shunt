@@ -113,6 +113,8 @@ Optional `~/.config/agent-shunt/config.json`:
   "apiKey": "sk-...",
   "apiKeyEnv": "GROQ_API_KEY",
   "responseFormat": "json_schema",
+  "disableReasoning": true,
+  "extraBody": { "top_p": 0.1 },
   "codexHomes": ["~/.codex"],
   "claudeHomes": ["~/.claude"]
 }
@@ -121,9 +123,23 @@ Optional `~/.config/agent-shunt/config.json`:
 - `baseUrl` — any http(s) origin; env override `AGENT_SHUNT_BASE_URL`.
 - Keys resolve in order: `apiKey` value → `AGENT_SHUNT_API_KEY` → `OPENROUTER_API_KEY` → the `apiKeyEnv` variable → env files.
 - `model` / `fallbackModels` — your provider's IDs. Transport, HTTP, and validation failures advance through the chain under one overall timeout.
+- `responseFormat` — `json_schema` (strict, when the provider supports it) or `json_object`. Output parsing is lenient in either mode: unknown keys are ignored, missing fields default, and a scalar where a list is expected is coerced — so loosely-conforming `json_object` providers still work, while claim validation stays local.
+- `disableReasoning` — set `true` for reasoning models so they answer directly (this tool does grounded extraction, not deliberation). Auto-injects the provider's disable-thinking parameter: z.ai `thinking:{type:disabled}`, Qwen/DashScope `enable_thinking:false`, otherwise OpenRouter-style `reasoning:{enabled:false}`.
+- `extraBody` — a JSON object merged into every request body, applied last so it overrides any tool default (including the reasoning field above). The escape hatch for any provider parameter the built-ins don't cover.
 - Numeric knobs (`timeoutMs`, `maxOutputTokens`, size/file caps) are also accepted; defaults are sane.
 
 CLI model overrides (`--model`) beat stored config.
+
+### Recommended models
+
+Run `agent-shunt recommend` for ready-to-merge config fragments. The task is grounded, structured extraction — cheap, fast, faithful line ranges — so reasoning adds nothing here.
+
+| Model | `baseUrl` | Notes | Privacy |
+| --- | --- | --- | --- |
+| `deepseek/deepseek-v4-flash` | OpenRouter | Default. Fast, cheap, strict `json_schema`. | ZDR (no retention/training) |
+| `z-ai/glm-4.7-flash` | OpenRouter | Default fallback; `json_schema`. | ZDR |
+| `glm-5.3-flash` | `https://api.z.ai/api/coding/paas/v4` | Fast **only** with `disableReasoning: true`; use `json_object`. | none — source leaves to z.ai |
+| local (Ollama/LM Studio/vLLM) | `http://localhost…` | Any capable instruct model, keyless; `json_object`. | full — nothing leaves the machine |
 
 ## Host integrations
 

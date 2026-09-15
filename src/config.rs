@@ -2,6 +2,7 @@ use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
 
 use crate::domain::Limits;
@@ -23,6 +24,14 @@ pub struct Config {
     pub local_provider: bool,
     pub limits: Limits,
     pub config_file: PathBuf,
+    /// Reasoning-model handling: when true, the worker injects the provider's
+    /// "disable thinking" parameter so any reasoning model behaves as a fast,
+    /// direct responder (this tool does grounded extraction, not deliberation).
+    pub disable_reasoning: bool,
+    /// Arbitrary JSON object merged into every worker request body, applied
+    /// last so it overrides tool defaults. The escape hatch for any provider
+    /// parameter the built-in fields do not cover.
+    pub extra_body: Value,
 }
 
 impl std::fmt::Debug for Config {
@@ -40,6 +49,8 @@ impl std::fmt::Debug for Config {
             .field("local_provider", &self.local_provider)
             .field("limits", &self.limits)
             .field("config_file", &self.config_file)
+            .field("disable_reasoning", &self.disable_reasoning)
+            .field("extra_body", &self.extra_body)
             .finish()
     }
 }
@@ -63,6 +74,8 @@ struct StoredConfig {
     max_files: Option<usize>,
     max_file_bytes: Option<usize>,
     max_total_bytes: Option<usize>,
+    disable_reasoning: Option<bool>,
+    extra_body: Option<Value>,
 }
 
 pub fn load(model_override: Option<&str>) -> Result<Config> {
@@ -186,6 +199,8 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
     if configured_claude_homes && claude_homes.is_empty() {
         bail!("claudeHomes must contain at least one non-empty path");
     }
+    let disable_reasoning = stored.disable_reasoning.unwrap_or(false);
+    let extra_body = normalize_extra_body(stored.extra_body)?;
     Ok(Config {
         model,
         fallback_models,
@@ -198,7 +213,19 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
         local_provider,
         limits,
         config_file,
+        disable_reasoning,
+        extra_body,
     })
+}
+
+/// Normalizes the optional `extraBody` into an object, rejecting any non-object
+/// JSON. Absent or explicit null becomes an empty object (a no-op merge).
+fn normalize_extra_body(value: Option<Value>) -> Result<Value> {
+    match value {
+        None | Some(Value::Null) => Ok(Value::Object(serde_json::Map::new())),
+        Some(value @ Value::Object(_)) => Ok(value),
+        Some(_) => bail!("extraBody must be a JSON object"),
+    }
 }
 
 /// Expands a leading `~` to the user's home directory; absolute and relative
@@ -276,7 +303,7 @@ where
 mod tests {
     use std::path::PathBuf;
 
-    use super::{bounded, expand_home, validate_base_url};
+    use super::{bounded, expand_home, normalize_extra_body, validate_base_url};
 
     #[test]
     fn accepts_any_https_origin_but_guards_plain_http() {
@@ -303,6 +330,23 @@ mod tests {
         assert!(bounded(Some(0usize), 1, 200, "maxFiles").is_err());
         assert!(bounded(Some(201usize), 1, 200, "maxFiles").is_err());
         assert_eq!(bounded(Some(30usize), 1, 200, "maxFiles").unwrap(), 30);
+    }
+
+    #[test]
+    fn extra_body_must_be_object() {
+        use serde_json::json;
+        assert!(normalize_extra_body(None).unwrap().is_object());
+        assert!(
+            normalize_extra_body(Some(serde_json::Value::Null))
+                .unwrap()
+                .is_object()
+        );
+        assert_eq!(
+            normalize_extra_body(Some(json!({"thinking": {"type": "disabled"}}))).unwrap(),
+            json!({"thinking": {"type": "disabled"}})
+        );
+        assert!(normalize_extra_body(Some(json!([1, 2]))).is_err());
+        assert!(normalize_extra_body(Some(json!("nope"))).is_err());
     }
 
     #[test]

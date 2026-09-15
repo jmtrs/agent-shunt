@@ -16,15 +16,35 @@ use crate::{application::ports::CodeSearch, domain::SearchHit};
 pub struct RipgrepSearch;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Generated or dependency-owned paths that never hold useful source evidence.
+/// Generated or dependency-owned paths, and secret-bearing files, that never
+/// hold useful source evidence. Directory patterns are `**/`-anchored so they
+/// match at any depth (a monorepo's `packages/app/node_modules`, not only a
+/// top-level `node_modules`); bare-filename patterns already match at any depth
+/// in ripgrep. These are applied *after* caller globs (see `apply_globs`) so a
+/// caller include such as `packages/**` cannot re-admit them via ripgrep's
+/// last-match-wins glob resolution.
 const EXCLUDED_GLOBS: &[&str] = &[
-    "!node_modules/**",
-    "!target/**",
-    "!.git/**",
-    "!dist/**",
-    "!build/**",
-    "!coverage/**",
-    "!.next/**",
+    "!**/node_modules/**",
+    "!**/target/**",
+    "!**/.git/**",
+    "!**/.svn/**",
+    "!**/.hg/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/coverage/**",
+    "!**/.next/**",
+    "!**/.env",
+    "!**/.env.*",
+    "!**/.idea/**",
+    "!**/.vscode/**",
+    "!**/.DS_Store",
+    "!**/__pycache__/**",
+    "!**/.venv/**",
+    "!**/.pytest_cache/**",
+    "!**/.mypy_cache/**",
+    "!**/.ruff_cache/**",
+    "!**/.gradle/**",
+    "!**/.terraform/**",
     "!Cargo.lock",
     "!package-lock.json",
     "!yarn.lock",
@@ -37,11 +57,26 @@ const EXCLUDED_GLOBS: &[&str] = &[
     "!flake.lock",
 ];
 
+/// Registers caller globs first, then [`EXCLUDED_GLOBS`], so the built-in
+/// exclusions always win ripgrep's last-match-wins resolution. Registering them
+/// in the other order lets a caller include (`packages/**`) silently re-admit
+/// `node_modules`, `.git`, and `.env`, flooding results with dependency code and
+/// leaking secrets into analysis.
+fn apply_globs(command: &mut Command, globs: &[String]) {
+    for glob in globs {
+        command.args(["--glob", glob]);
+    }
+    for glob in EXCLUDED_GLOBS {
+        command.args(["--glob", glob]);
+    }
+}
+
 /// Filename extensions that never hold readable source. A filename match on one
 /// of these (e.g. `create-table.png`) must never enter the ranked set.
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "pdf", "zip", "gz", "tar", "bz2",
-    "xz", "7z", "rar", "jar", "war", "class", "exe", "dll", "so", "dylib", "bin", "dat", "wasm",
+    "xz", "7z", "rar", "tgz", "jar", "war", "class", "exe", "dll", "so", "dylib", "bin", "dat",
+    "wasm",
     "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "mkv", "wav", "flac", "psd",
     "lockb", "node", "pyc", "obj",
 ];
@@ -54,8 +89,8 @@ const IDF_SCALE: f64 = 4.0;
 
 /// A file whose *name* matches a query term is a strong locator ("metrics" ->
 /// metrics.rs), so a filename match is worth several content occurrences of the
-/// same term. Weighted by the term's rarity, so a generic filename token cannot
-/// dominate the way `create-table.png` used to.
+/// same term, weighted by the term's rarity (IDF). Generic tokens weigh little,
+/// so `create-table.png` cannot dominate the way it used to.
 const FILENAME_BOOST: usize = 8;
 
 const STOP_WORDS: &[&str] = &[
@@ -104,12 +139,7 @@ impl CodeSearch for RipgrepSearch {
             "--max-filesize",
             "5M",
         ]);
-        for glob in EXCLUDED_GLOBS {
-            command.args(["--glob", glob]);
-        }
-        for glob in globs {
-            command.args(["--glob", glob]);
-        }
+        apply_globs(&mut command, globs);
         command.args(["--", &pattern, "."]);
         command
             .stdout(Stdio::piped())
@@ -206,7 +236,7 @@ impl CodeSearch for RipgrepSearch {
         // keep it as the score for files matched only by name.
         let mut filename_boost = std::collections::HashMap::<String, usize>::new();
         for hit in &filename_raw {
-            let boost = weight_of(hit.matched_terms, &term_weight) * FILENAME_BOOST;
+            let boost = filename_boost_of(hit.matched_terms, &term_weight);
             filename_boost
                 .entry(hit.path.clone())
                 .and_modify(|value| *value = (*value).max(boost))
@@ -224,8 +254,13 @@ impl CodeSearch for RipgrepSearch {
             // query the file covers, and the filename locator boost.
             hit.score = line_weight * 2 + file_weight + name_boost;
         }
+        // Keep a filename hit only for a file with no content match. Where the
+        // file also matches in content, its boost is already folded into those
+        // hits; emitting the line-1 filename hit too would surface a useless
+        // top-of-file chunk (imports/boilerplate) that beats the real evidence.
+        filename_raw.retain(|hit| !coverage.contains_key(hit.path.as_str()));
         for hit in &mut filename_raw {
-            hit.score = weight_of(hit.matched_terms, &term_weight) * FILENAME_BOOST;
+            hit.score = filename_boost_of(hit.matched_terms, &term_weight);
         }
         hits.append(&mut filename_raw);
         hits.sort_by(|left, right| {
@@ -266,12 +301,7 @@ fn filename_hits(
 ) -> Result<Vec<SearchHit>> {
     let mut command = Command::new("rg");
     command.current_dir(root).args(["--files"]);
-    for glob in EXCLUDED_GLOBS {
-        command.args(["--glob", glob]);
-    }
-    for glob in globs {
-        command.args(["--glob", glob]);
-    }
+    apply_globs(&mut command, globs);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -431,6 +461,11 @@ fn weight_of(mask: u16, term_weight: &[usize]) -> usize {
         .sum()
 }
 
+/// Filename-match boost: the matched terms' IDF weight scaled by [`FILENAME_BOOST`].
+fn filename_boost_of(mask: u16, term_weight: &[usize]) -> usize {
+    weight_of(mask, term_weight) * FILENAME_BOOST
+}
+
 fn has_binary_extension(path: &str) -> bool {
     Path::new(path)
         .extension()
@@ -534,6 +569,36 @@ mod tests {
             .search(root.path(), "create table", 10, &[])
             .unwrap();
         assert!(hits.iter().all(|hit| hit.path != "create-table.png"));
+    }
+
+    #[test]
+    fn caller_include_glob_cannot_readmit_excluded_paths() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("packages/app/src")).unwrap();
+        fs::create_dir_all(root.path().join("packages/app/node_modules/dep")).unwrap();
+        fs::write(
+            root.path().join("packages/app/src/config.js"),
+            "const SECRET_TOKEN = read();\n",
+        )
+        .unwrap();
+        // A nested dependency file and a secrets file that a naive include glob
+        // (`packages/**`) would otherwise re-admit past the built-in excludes.
+        fs::write(
+            root.path().join("packages/app/node_modules/dep/index.js"),
+            "const SECRET_TOKEN = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("packages/app/.env"),
+            "SECRET_TOKEN=super-secret\n",
+        )
+        .unwrap();
+        let hits = RipgrepSearch
+            .search(root.path(), "SECRET_TOKEN", 20, &["packages/**".to_owned()])
+            .unwrap();
+        assert!(hits.iter().any(|hit| hit.path.contains("src/config.js")));
+        assert!(hits.iter().all(|hit| !hit.path.contains("node_modules")));
+        assert!(hits.iter().all(|hit| !hit.path.contains(".env")));
     }
 
     #[test]

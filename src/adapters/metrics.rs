@@ -115,6 +115,7 @@ mod tests {
                 total_tokens: Some(25),
                 cost: Some(0.001),
                 fallback: false,
+                error_kind: None,
             })
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();

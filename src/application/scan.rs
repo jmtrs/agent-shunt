@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     application::ports::{ContextWorker, CredentialResolver, DocumentLoader},
-    domain::{DryRunResult, Finding, Limits, ScanResult, Usage, WorkerRequest},
+    domain::{DryRunResult, Finding, Limits, LineRange, ScanResult, Usage, WorkerRequest},
 };
 
 const MAX_ANSWER_UTF16: usize = 16_000;
@@ -16,6 +16,29 @@ const MAX_SUMMARY_UTF16: usize = 2_000;
 const MAX_UNCERTAINTY_UTF16: usize = 2_000;
 const MAX_FINDINGS: usize = 100;
 const MAX_UNCERTAINTIES: usize = 50;
+/// When retrieval hands the worker a file as several nearby chunks, a correct
+/// finding often spans two of them (and the small gap between). Merging allowed
+/// ranges separated by at most this many lines lets such a finding validate,
+/// while ranges far apart stay distinct so the guard still rejects references to
+/// unretrieved regions.
+const ALLOWED_RANGE_MERGE_GAP: usize = 16;
+
+/// Coalesces sorted allowed ranges whose gap is within [`ALLOWED_RANGE_MERGE_GAP`].
+fn merge_adjacent_ranges(ranges: &[LineRange]) -> Vec<LineRange> {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_by_key(|range| (range.start_line, range.end_line));
+    let mut merged: Vec<LineRange> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        if let Some(last) = merged.last_mut()
+            && range.start_line <= last.end_line.saturating_add(ALLOWED_RANGE_MERGE_GAP) + 1
+        {
+            last.end_line = last.end_line.max(range.end_line);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
 
 #[derive(Debug)]
 pub struct FallbackExhausted {
@@ -163,12 +186,62 @@ pub fn validate_question(question: &str, limits: &Limits) -> Result<()> {
     Ok(())
 }
 
+// Lenient by design for `json_object` mode (providers that do not enforce
+// strict `json_schema`): unknown keys are ignored, every field defaults when
+// omitted, and a scalar where a list is expected is coerced. A model that skips
+// `findings` or writes `uncertainties` as one string must not fail the whole
+// response — the real guardrail is `validate_worker_result`, which checks each
+// finding's path and line range against the supplied source. In strict
+// `json_schema` mode none of this triggers (the schema already constrains shape).
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawResult {
+    #[serde(default)]
     answer: String,
+    #[serde(default, deserialize_with = "value_seq")]
     findings: Vec<Finding>,
+    #[serde(default, deserialize_with = "string_seq")]
     uncertainties: Vec<String>,
+}
+
+/// Deserializes a `Vec<T>` tolerantly: an explicit `null` or a single object
+/// becomes an empty/one-element list rather than a type error.
+fn value_seq<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::Deserialize as _;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(|item| serde_json::from_value(item).map_err(serde::de::Error::custom))
+            .collect(),
+        other => Ok(vec![
+            serde_json::from_value(other).map_err(serde::de::Error::custom)?,
+        ]),
+    }
+}
+
+/// Deserializes a `Vec<String>` tolerantly: a bare string becomes a one-element
+/// list, `null` becomes empty, and non-string array items are stringified.
+fn string_seq<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let stringify = |item: serde_json::Value| match item {
+        serde_json::Value::String(text) => text,
+        other => other.to_string(),
+    };
+    Ok(match value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::String(text) => vec![text],
+        serde_json::Value::Array(items) => items.into_iter().map(stringify).collect(),
+        other => vec![stringify(other)],
+    })
 }
 
 pub fn validate_worker_result(
@@ -202,8 +275,7 @@ pub fn validate_worker_result(
         if range.start_line == 0
             || range.end_line < range.start_line
             || range.end_line > document.line_count
-            || !document
-                .allowed_ranges
+            || !merge_adjacent_ranges(&document.allowed_ranges)
                 .iter()
                 .any(|allowed| allowed.contains(range))
         {
@@ -295,6 +367,50 @@ mod tests {
     }
 
     #[test]
+    fn accepts_finding_spanning_a_small_gap_but_not_a_large_one() {
+        let doc = |ranges: Vec<LineRange>| Document {
+            path: "src/a.rs".to_owned(),
+            bytes: 10,
+            line_count: 300,
+            lines: vec![String::new(); 300],
+            numbered_content: String::new(),
+            allowed_ranges: ranges,
+        };
+        let spanning = json!({
+            "answer": "found",
+            "findings": [{"path": "src/a.rs", "startLine": 12, "endLine": 51, "summary": "x"}],
+            "uncertainties": []
+        });
+        // Two nearby chunks (gap of 6) merge, so a finding across them validates.
+        assert!(
+            validate_worker_result(
+                &spanning.to_string(),
+                &[doc(vec![
+                    LineRange { start_line: 1, end_line: 33 },
+                    LineRange { start_line: 40, end_line: 67 },
+                ])],
+                "m".to_owned(),
+                None,
+            )
+            .is_ok()
+        );
+        // Chunks far apart do not merge: a reference into the unretrieved gap is
+        // still rejected as ungrounded.
+        assert!(
+            validate_worker_result(
+                &spanning.to_string(),
+                &[doc(vec![
+                    LineRange { start_line: 1, end_line: 20 },
+                    LineRange { start_line: 200, end_line: 220 },
+                ])],
+                "m".to_owned(),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn rejects_unknown_paths_and_unseen_ranges() {
         let unknown = json!({
             "answer": "found",
@@ -315,20 +431,46 @@ mod tests {
     }
 
     #[test]
-    fn rejects_extra_model_fields() {
-        let raw = json!({"answer": "x", "findings": [], "uncertainties": [], "surprise": true});
-        assert!(
-            validate_worker_result(
-                &raw.to_string(),
-                &[document(vec![LineRange {
-                    start_line: 1,
-                    end_line: 3
-                }])],
-                "m".to_owned(),
-                None
-            )
-            .is_err()
-        );
+    fn tolerates_extra_model_fields() {
+        // Providers in `json_object` mode (no strict schema) may echo extra
+        // keys at the top level (e.g. `sources`) or inside a finding. These are
+        // ignored, not fatal: the guardrail is path/line-range validation.
+        let raw = json!({
+            "answer": "x",
+            "uncertainties": [],
+            "sources": ["echoed", "input"],
+            "findings": [
+                {"path": "src/a.rs", "startLine": 1, "endLine": 2, "summary": "s", "confidence": 0.9}
+            ]
+        });
+        let result = validate_worker_result(
+            &raw.to_string(),
+            &[document(vec![LineRange {
+                start_line: 1,
+                end_line: 3,
+            }])],
+            "m".to_owned(),
+            None,
+        )
+        .expect("extra fields must be ignored, not rejected");
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].start_line, 1);
+    }
+
+    #[test]
+    fn tolerates_missing_fields_and_scalar_lists() {
+        // json_object providers may omit `findings` and write `uncertainties`
+        // as a bare string; both must be accepted and normalized.
+        let raw = json!({"answer": "x", "uncertainties": "just one note"});
+        let result = validate_worker_result(&raw.to_string(), &[], "m".to_owned(), None)
+            .expect("missing findings and scalar uncertainties must be tolerated");
+        assert!(result.findings.is_empty());
+        assert_eq!(result.uncertainties, vec!["just one note".to_owned()]);
+
+        // Explicit nulls collapse to empty lists rather than erroring.
+        let nulls = json!({"answer": "x", "findings": null, "uncertainties": null});
+        let result = validate_worker_result(&nulls.to_string(), &[], "m".to_owned(), None).unwrap();
+        assert!(result.findings.is_empty() && result.uncertainties.is_empty());
     }
 
     struct Credential;

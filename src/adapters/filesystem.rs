@@ -65,23 +65,19 @@ impl DocumentLoader for SecureFilesystem {
             if !before.is_file() {
                 bail!("path is not a regular file: {}", input.display());
             }
+            // An oversized file is skipped, not fatal: automatic retrieval can
+            // select a large generated artifact (e.g. a bundled HTML or log
+            // matched by filename), and it must not sink the whole batch. It
+            // would never fit the evidence budget anyway.
             let size = usize::try_from(before.len()).unwrap_or(usize::MAX);
             if size > limits.max_file_bytes {
-                bail!(
-                    "file exceeds {} bytes: {}",
-                    limits.max_file_bytes,
-                    input.display()
-                );
+                continue;
             }
             let mut buffer = Vec::with_capacity(size);
             let mut bounded: Take<&mut File> = (&mut file).take((limits.max_file_bytes + 1) as u64);
             bounded.read_to_end(&mut buffer)?;
             if buffer.len() > limits.max_file_bytes {
-                bail!(
-                    "file exceeds {} bytes: {}",
-                    limits.max_file_bytes,
-                    input.display()
-                );
+                continue;
             }
             let after = file.metadata()?;
             if !same_file_snapshot(&before, &after) || buffer.len() as u64 != after.len() {
