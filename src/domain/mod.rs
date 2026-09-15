@@ -199,7 +199,7 @@ pub struct MetricRecord {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexInstallReport {
+pub struct InstallReport {
     pub home: PathBuf,
     pub skill_changed: bool,
     pub hook_changed: bool,

@@ -15,6 +15,7 @@ pub struct Config {
     pub model: String,
     pub fallback_models: Vec<String>,
     pub codex_homes: Vec<PathBuf>,
+    pub claude_homes: Vec<PathBuf>,
     pub base_url: String,
     pub response_format: String,
     pub api_key: Option<String>,
@@ -31,6 +32,7 @@ impl std::fmt::Debug for Config {
             .field("model", &self.model)
             .field("fallback_models", &self.fallback_models)
             .field("codex_homes", &self.codex_homes)
+            .field("claude_homes", &self.claude_homes)
             .field("base_url", &self.base_url)
             .field("response_format", &self.response_format)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
@@ -48,6 +50,7 @@ struct StoredConfig {
     model: Option<String>,
     fallback_models: Option<Vec<String>>,
     codex_homes: Option<Vec<String>>,
+    claude_homes: Option<Vec<String>>,
     base_url: Option<String>,
     response_format: Option<String>,
     api_key: Option<String>,
@@ -171,10 +174,23 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
     if configured_codex_homes && codex_homes.is_empty() {
         bail!("codexHomes must contain at least one non-empty path");
     }
+    let configured_claude_homes = stored.claude_homes.is_some();
+    let claude_homes = stored
+        .claude_homes
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|raw| expand_home(raw))
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    if configured_claude_homes && claude_homes.is_empty() {
+        bail!("claudeHomes must contain at least one non-empty path");
+    }
     Ok(Config {
         model,
         fallback_models,
         codex_homes,
+        claude_homes,
         base_url,
         response_format,
         api_key,

@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 
 use crate::{
     adapters::{
-        codex_install::CodexInstaller, credentials::EnvironmentCredentials,
-        filesystem::SecureFilesystem, metrics::JsonlMetrics,
+        claude_install::ClaudeInstaller, codex_install::CodexInstaller,
+        credentials::EnvironmentCredentials, filesystem::SecureFilesystem, metrics::JsonlMetrics,
         openai_compatible::OpenAiCompatibleWorker, ripgrep::RipgrepSearch,
     },
     application::{
@@ -22,7 +22,8 @@ pub struct Application {
     filesystem: SecureFilesystem,
     search: RipgrepSearch,
     metrics: JsonlMetrics,
-    installer: CodexInstaller,
+    codex_installer: CodexInstaller,
+    claude_installer: ClaudeInstaller,
 }
 
 struct RecordedResult {
@@ -34,16 +35,18 @@ struct RecordedResult {
     fallback: bool,
 }
 
+fn default_executable() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/opt/homebrew/bin/agent-shunt"))
+}
+
 impl Default for Application {
     fn default() -> Self {
         Self {
             filesystem: SecureFilesystem,
             search: RipgrepSearch,
             metrics: JsonlMetrics::new(JsonlMetrics::default_path()),
-            installer: CodexInstaller::new(
-                std::env::current_exe()
-                    .unwrap_or_else(|_| PathBuf::from("/opt/homebrew/bin/agent-shunt")),
-            ),
+            codex_installer: CodexInstaller::new(default_executable()),
+            claude_installer: ClaudeInstaller::new(default_executable()),
         }
     }
 }
@@ -192,7 +195,13 @@ impl Application {
 
     pub fn install_codex(&self, homes: &[PathBuf], hook: bool) -> Result<Value> {
         Ok(serde_json::to_value(
-            self.installer.install_codex(homes, hook)?,
+            self.codex_installer.install(homes, hook)?,
+        )?)
+    }
+
+    pub fn install_claude(&self, homes: &[PathBuf], hook: bool) -> Result<Value> {
+        Ok(serde_json::to_value(
+            self.claude_installer.install(homes, hook)?,
         )?)
     }
 

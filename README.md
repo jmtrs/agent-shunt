@@ -113,7 +113,8 @@ Optional `~/.config/agent-shunt/config.json`:
   "apiKey": "sk-...",
   "apiKeyEnv": "GROQ_API_KEY",
   "responseFormat": "json_schema",
-  "codexHomes": ["~/.codex"]
+  "codexHomes": ["~/.codex"],
+  "claudeHomes": ["~/.claude"]
 }
 ```
 
@@ -124,13 +125,18 @@ Optional `~/.config/agent-shunt/config.json`:
 
 CLI model overrides (`--model`) beat stored config.
 
-## Codex integration
+## Host integrations
+
+Two hosts have first-class installers today:
 
 ```bash
-agent-shunt install codex --hook
+agent-shunt install claude --hook   # Claude Code  (~/.claude)
+agent-shunt install codex --hook    # Codex       (~/.codex)
 ```
 
-Installs a consultative skill plus a fail-open guardrail into every configured Codex home (defaults to `~/.codex`, extend with `codexHomes` or repeatable `--home`). Whole-file reads above 32 KiB get redirected through the shunt; everything else is untouched. Backups are made before touching `hooks.json`, unrelated hooks are preserved, and all homes roll back if any step fails. After a hook change, trust the definition via `/hooks` in Codex.
+Each drops a consultative skill into the host's skills directory and merges a fail-open guardrail into its hook config — `settings.json` for Claude Code, `hooks.json` for Codex. Whole-file reads above 32 KiB (`Read`/`Bash cat`) get redirected through the shunt with the reason inline; ranged reads and everything else pass untouched. Your existing settings, permissions, and hooks are preserved (a `.agent-shunt.bak` backup is made before any change), re-running is idempotent, and if any home fails, all homes roll back. Multiple homes via repeatable `--home` or the `codexHomes`/`claudeHomes` config keys. After a hook change, Codex asks you to re-trust it via `/hooks`; Claude Code needs nothing else.
+
+**Any other agent.** The CLI is plain shell — any tool that can run commands (Gemini CLI, OpenCode, Cursor, …) can use it directly; paste the skill's two commands into its instructions. New hosts are a thin config on the same installer core, so more first-class integrations land without restructuring.
 
 ## License
 

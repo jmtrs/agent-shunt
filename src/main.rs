@@ -51,6 +51,10 @@ enum HookCommand {
         #[arg(long, default_value_t = 32_768)]
         threshold_bytes: u64,
     },
+    ClaudePreToolUse {
+        #[arg(long, default_value_t = 32_768)]
+        threshold_bytes: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -61,6 +65,15 @@ enum InstallCommand {
         hook: bool,
         /// Codex home to install into; repeatable. Defaults to the codexHomes
         /// configuration value, or ~/.codex when unset.
+        #[arg(long = "home")]
+        homes: Vec<PathBuf>,
+    },
+    Claude {
+        /// Install the PreToolUse guardrail in addition to the skill.
+        #[arg(long)]
+        hook: bool,
+        /// Claude Code home to install into; repeatable. Defaults to the
+        /// claudeHomes configuration value, or ~/.claude when unset.
         #[arg(long = "home")]
         homes: Vec<PathBuf>,
     },
@@ -172,10 +185,24 @@ fn run() -> Result<()> {
                 }
                 app.install_codex(&homes, hook)?
             }
+            InstallCommand::Claude { hook, mut homes } => {
+                if homes.is_empty() {
+                    let config = config::load(None)?;
+                    homes = if config.claude_homes.is_empty() {
+                        let home = dirs::home_dir()
+                            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+                        vec![home.join(".claude")]
+                    } else {
+                        config.claude_homes
+                    };
+                }
+                app.install_claude(&homes, hook)?
+            }
         },
         Some(Command::Hook { command }) => match command {
-            HookCommand::CodexPreToolUse { threshold_bytes } => {
-                agent_shunt::adapters::codex_hook::run_pre_tool_use(threshold_bytes)?;
+            HookCommand::CodexPreToolUse { threshold_bytes }
+            | HookCommand::ClaudePreToolUse { threshold_bytes } => {
+                agent_shunt::adapters::pre_tool_use::run_pre_tool_use(threshold_bytes)?;
                 return Ok(());
             }
         },

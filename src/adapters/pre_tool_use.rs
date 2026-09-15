@@ -21,7 +21,7 @@ pub fn run_pre_tool_use(threshold_bytes: u64) -> Result<()> {
     io::stdin()
         .take(1_000_001)
         .read_to_string(&mut encoded)
-        .context("cannot read Codex hook input")?;
+        .context("cannot read hook input")?;
     if encoded.len() > 1_000_000 {
         return Ok(());
     }
@@ -72,9 +72,12 @@ fn whole_file_candidate(event: &HookEvent) -> Option<PathBuf> {
             _ => None,
         };
     }
+    // Claude Code names its tool `Read`; Codex and filesystem MCP servers
+    // use the variants below. All share the same input shape (`file_path` or
+    // `path`, ranges via offset/limit/... keys handled above).
     if !matches!(
         tool.as_str(),
-        "read_file" | "read_text_file" | "mcp__filesystem__read_file"
+        "read" | "read_file" | "read_text_file" | "mcp__filesystem__read_file"
     ) {
         return None;
     }
@@ -165,5 +168,35 @@ mod tests {
             tool_input: json!({"path":"src/main.rs"}),
         };
         assert!(whole_file_candidate(&unknown).is_none());
+    }
+
+    #[test]
+    fn detects_claude_code_tool_shapes() {
+        let claude_read = HookEvent {
+            cwd: ".".into(),
+            tool_name: "Read".to_owned(),
+            tool_input: json!({"file_path":"src/main.rs"}),
+        };
+        assert_eq!(
+            whole_file_candidate(&claude_read).unwrap(),
+            std::path::PathBuf::from("src/main.rs")
+        );
+
+        let ranged = HookEvent {
+            cwd: ".".into(),
+            tool_name: "Read".to_owned(),
+            tool_input: json!({"file_path":"src/main.rs", "offset":100, "limit":50}),
+        };
+        assert!(whole_file_candidate(&ranged).is_none());
+
+        let claude_bash = HookEvent {
+            cwd: ".".into(),
+            tool_name: "Bash".to_owned(),
+            tool_input: json!({"command":"cat src/main.rs"}),
+        };
+        assert_eq!(
+            whole_file_candidate(&claude_bash).unwrap(),
+            std::path::PathBuf::from("src/main.rs")
+        );
     }
 }

@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    CodexInstallReport, Limits, LoadedDocuments, MetricRecord, SearchHit, WorkerRequest,
-    WorkerResponse,
+    InstallReport, Limits, LoadedDocuments, MetricRecord, SearchHit, WorkerRequest, WorkerResponse,
 };
 
 pub trait DocumentLoader {
@@ -52,5 +51,5 @@ pub trait MetricsSink {
 }
 
 pub trait HostInstaller {
-    fn install_codex(&self, homes: &[PathBuf], hook: bool) -> Result<Vec<CodexInstallReport>>;
+    fn install(&self, homes: &[PathBuf], hook: bool) -> Result<Vec<InstallReport>>;
 }
