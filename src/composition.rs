@@ -203,6 +203,8 @@ impl Application {
             &config.base_url,
             &config.model,
             &api_key,
+            config.disable_reasoning,
+            config.extra_body.clone(),
             config.limits.clone(),
         ))
     }
@@ -215,6 +217,8 @@ impl Application {
             &config.base_url,
             &config.model,
             &api_key,
+            config.disable_reasoning,
+            config.extra_body.clone(),
             config.limits.clone(),
         ))
     }

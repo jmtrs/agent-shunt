@@ -50,11 +50,13 @@ const MAX_DIFF_TERM_TEXT: usize = 100_000;
 /// other hits from the same files by this factor.
 const SCOPE_HUNK_BOOST: usize = 3;
 
-/// Unscoped retrieval multiplies the score of hits in git-untracked or modified
-/// files by this factor, so newly written code is not buried under older files
-/// that share its vocabulary. Below [`SCOPE_HUNK_BOOST`]: a nudge for relevance,
+/// Unscoped retrieval multiplies the score of hits in git-untracked (brand-new)
+/// files by this factor, so freshly written code is not buried under older files
+/// that share its vocabulary. Limited to untracked files: modified tracked files
+/// are already findable, and boosting them would make ranking depend on whatever
+/// happens to be uncommitted. Below [`SCOPE_HUNK_BOOST`]: a nudge for relevance,
 /// not the hard subject-of-review focus that `--diff` applies.
-const CHANGED_FILE_BOOST: usize = 2;
+const UNTRACKED_FILE_BOOST: usize = 2;
 
 /// Largest enclosing block a hit may expand into. Beyond this the block is a
 /// whole impl/class/file, not a focused unit, so the hit keeps its fixed
@@ -235,20 +237,25 @@ pub fn execute_with_resolver(
             }
         }
     } else {
-        // Unscoped: surface locally new or modified code. A matching file that
-        // is git-untracked or changed is likely the subject of the current work,
-        // yet its lower term frequency can bury it under older files with the
-        // same vocabulary. Boost hits on changed paths so new code is not lost.
+        // Unscoped: surface brand-new code. A matching file that is git-untracked
+        // is likely the subject of the current work, yet its lower term frequency
+        // can bury it under older files with the same vocabulary. Boost hits on
+        // untracked paths only — modified tracked files are already findable, and
+        // boosting them would make ranking swing with whatever is uncommitted.
         // Best-effort: only files that already matched are lifted, and outside a
-        // git work tree (or on error) nothing changes.
-        if let Ok(changes) = change_source.changes(&input.cwd, "HEAD") {
-            let changed = changes
+        // git work tree (or on error) nothing changes. The `.git` check avoids
+        // spawning git at all when the directory is not a repository.
+        if in_git_worktree(&input.cwd)
+            && let Ok(changes) = change_source.changes(&input.cwd, "HEAD")
+        {
+            let untracked = changes
                 .iter()
+                .filter(|change| change.whole_file)
                 .map(|change| change.path.as_str())
                 .collect::<std::collections::HashSet<_>>();
             for hit in &mut hits {
-                if changed.contains(hit.path.as_str()) {
-                    hit.score = hit.score.saturating_mul(CHANGED_FILE_BOOST);
+                if untracked.contains(hit.path.as_str()) {
+                    hit.score = hit.score.saturating_mul(UNTRACKED_FILE_BOOST);
                 }
             }
         }
@@ -628,6 +635,9 @@ fn fuse_dense(
     let count = candidates.len();
     for (position, (index, _)) in fused.iter().enumerate() {
         // Fused rank -> descending integer score the rest of the pipeline reads.
+        // Scores become dense linear ranks, so the downstream `MIN_SCORE_PERCENT`
+        // floor trims by rank position here, not by ratio to the top term score —
+        // intended: after fusion the lexical magnitudes are no longer comparable.
         candidates[*index].score = count - position;
     }
     candidates.sort_by(|left, right| {
@@ -807,6 +817,19 @@ fn similarity(
     } else {
         overlap
     }
+}
+
+/// Whether `cwd`, or an ancestor, contains a `.git` entry — a cheap filesystem
+/// check that avoids spawning git for the changed-file boost outside a work tree.
+fn in_git_worktree(cwd: &std::path::Path) -> bool {
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        if current.join(".git").exists() {
+            return true;
+        }
+        dir = current.parent();
+    }
+    false
 }
 
 /// A hit counts as inside the change when the file is wholly new (`whole_file`,

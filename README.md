@@ -123,7 +123,7 @@ agent-shunt retrieve --diff --question "what did this change break?" --dir .
 agent-shunt retrieve --diff origin/main --question "review these changes" --dir .
 ```
 
-Even without `--diff`, plain `retrieve` gives a modest ranking boost to matching files that are git-untracked or modified, so freshly written code is not buried under older files that share its vocabulary.
+Even without `--diff`, plain `retrieve` gives a modest ranking boost to matching files that are git-untracked (brand-new), so freshly written code is not buried under older files that share its vocabulary.
 
 Chunks snap to their enclosing definition — the function, method, or class with its signature, decorators, and doc-comments — via tree-sitter (Rust, Python, JS/TS/TSX, Go, Java, C/C++, Ruby, Bash, JSON), falling back to a language-agnostic indentation heuristic elsewhere. Build with `--no-default-features` to drop tree-sitter and use the heuristic everywhere.
 

@@ -42,7 +42,7 @@ agent-shunt retrieve --diff --question "<what changed / what could break>" --dir
 agent-shunt retrieve --diff origin/develop --question "<review these changes>" --dir "<repo>"
 ```
 
-Even without `--diff`, unscoped `retrieve` gives matching untracked/modified files a ranking nudge, so new code is not lost — but for a review, `--diff` is the right tool.
+Even without `--diff`, unscoped `retrieve` gives matching git-untracked (brand-new) files a ranking nudge, so new code is not lost — but for a review, `--diff` is the right tool.
 
 ## Keep unsafe or noisy paths out
 
