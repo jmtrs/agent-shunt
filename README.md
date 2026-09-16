@@ -131,7 +131,9 @@ Optional `~/.config/agent-shunt/config.json`:
   "responseFormat": "json_schema",
   "disableReasoning": true,
   "extraBody": { "top_p": 0.1 },
-  "embeddingModel": "openai/text-embedding-3-small",
+  "embeddingModel": "text-embedding-3-small",
+  "embeddingBaseUrl": "https://api.openai.com/v1",
+  "embeddingApiKeyEnv": "OPENAI_API_KEY",
   "codexHomes": ["~/.codex"],
   "claudeHomes": ["~/.claude"]
 }
@@ -143,7 +145,7 @@ Optional `~/.config/agent-shunt/config.json`:
 - `responseFormat` — `json_schema` (strict, when the provider supports it) or `json_object`. Output parsing is lenient in either mode: unknown keys are ignored, missing fields default, and a scalar where a list is expected is coerced — so loosely-conforming `json_object` providers still work, while claim validation stays local.
 - `disableReasoning` — set `true` for reasoning models so they answer directly (this tool does grounded extraction, not deliberation). Auto-injects the provider's disable-thinking parameter: z.ai `thinking:{type:disabled}`, Qwen/DashScope `enable_thinking:false`, otherwise OpenRouter-style `reasoning:{enabled:false}`.
 - `extraBody` — a JSON object merged into every request body, applied last so it overrides any tool default (including the reasoning field above). The escape hatch for any provider parameter the built-ins don't cover.
-- `embeddingModel` — enables `--semantic`. `embeddingBaseUrl` defaults to `baseUrl`; the key resolves like the worker's, or via `embeddingApiKeyEnv`. A local embeddings endpoint (Ollama `nomic-embed-text`) keeps `--semantic` keyless and on-machine.
+- `embeddingModel` — enables `--semantic`. Point `embeddingBaseUrl` at a provider that serves `/embeddings` (OpenAI, or a local Ollama/LM Studio) — **OpenRouter does not**, so `embeddingBaseUrl` usually differs from `baseUrl` even though it defaults to it. The key resolves like the worker's, or via `embeddingApiKeyEnv`. A local endpoint (Ollama `nomic-embed-text`) keeps `--semantic` keyless and on-machine.
 - Retrieval tuning `mmrLambda` / `maxBlockLines` / `minScorePercent` override the built-in defaults; the matching CLI flags win over config.
 - Numeric knobs (`timeoutMs`, `maxOutputTokens`, size/file caps) are also accepted; defaults are sane.
 
