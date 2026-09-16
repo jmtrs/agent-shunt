@@ -1,6 +1,7 @@
 pub mod claude_install;
 pub mod codex_install;
 pub mod credentials;
+pub mod embedding_index;
 pub mod filesystem;
 pub mod gemini_install;
 pub mod git;
@@ -11,3 +12,5 @@ pub mod opencode_install;
 pub mod pre_tool_use;
 pub mod repo_install;
 pub mod ripgrep;
+#[cfg(feature = "ast")]
+pub mod tree_sitter_chunker;

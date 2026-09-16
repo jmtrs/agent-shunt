@@ -170,6 +170,18 @@ struct RetrieveArgs {
     context_lines: usize,
     #[arg(long, default_value_t = 200)]
     max_hits: usize,
+    /// MMR relevance/diversity trade-off in [0,1]; higher favors relevance.
+    /// Overrides config `mmrLambda`; defaults to the built-in tuning.
+    #[arg(long = "mmr-lambda")]
+    mmr_lambda: Option<f64>,
+    /// Largest enclosing block a hit may expand into before falling back to the
+    /// fixed context window. Overrides config `maxBlockLines`.
+    #[arg(long = "max-block-lines")]
+    max_block_lines: Option<usize>,
+    /// Drop chunks scoring below this percent of the top hit. Overrides config
+    /// `minScorePercent`.
+    #[arg(long = "min-score-percent")]
+    min_score_percent: Option<usize>,
     /// Ripgrep glob applied to the search (repeatable). Prefix with `!` to
     /// exclude, e.g. `--glob '!public/**'` or `--glob 'src/**'`.
     #[arg(long = "glob")]
@@ -184,6 +196,23 @@ struct RetrieveArgs {
     diff: Option<String>,
     #[arg(long)]
     analyze: bool,
+    /// Opt-in hybrid retrieval: fuse the local lexical ranking with a dense
+    /// embedding ranking (Reciprocal Rank Fusion) so semantically relevant
+    /// chunks surface even when they share few exact terms. Requires an
+    /// `embeddingModel` in config and sends candidate chunks to that endpoint.
+    #[arg(long)]
+    semantic: bool,
+    /// Opt-in precise re-ranking: the worker model scores the top candidate
+    /// chunks for how directly they answer the question and reorders them
+    /// before the budget is packed. Sends those chunks to the model.
+    #[arg(long)]
+    rerank: bool,
+    /// Opt-in query expansion: a chat model adds related search terms
+    /// (synonyms, likely identifiers) so the lexical search recovers code
+    /// phrased differently — no embeddings endpoint needed. Enable by default
+    /// with `expandByDefault` in config.
+    #[arg(long)]
+    expand: bool,
 }
 
 fn main() {
@@ -213,6 +242,9 @@ fn run() -> Result<()> {
                     .into_iter()
                     .map(|pattern| format!("!{pattern}")),
             );
+            use agent_shunt::application::retrieve::{
+                MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA,
+            };
             let input = RetrieveInput {
                 question: args.question,
                 cwd: args.cwd,
@@ -224,8 +256,26 @@ fn run() -> Result<()> {
                 scope: args
                     .diff
                     .map(|base| agent_shunt::application::retrieve::ChangeScope { base }),
+                // Precedence: explicit CLI flag, then config override, then the
+                // built-in default.
+                mmr_lambda: args.mmr_lambda.or(config.mmr_lambda).unwrap_or(MMR_LAMBDA),
+                max_block_lines: args
+                    .max_block_lines
+                    .or(config.max_block_lines)
+                    .unwrap_or(MAX_BLOCK_LINES),
+                min_score_percent: args
+                    .min_score_percent
+                    .or(config.min_score_percent)
+                    .unwrap_or(MIN_SCORE_PERCENT),
             };
-            app.retrieve(input, args.analyze, &config)?
+            app.retrieve(
+                input,
+                args.analyze,
+                args.semantic,
+                args.rerank,
+                args.expand,
+                &config,
+            )?
         }
         Some(Command::Check(args)) => {
             let config = config::load(args.model.as_deref())?;

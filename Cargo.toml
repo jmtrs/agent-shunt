@@ -1,6 +1,6 @@
 [package]
 name = "agent-shunt"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Provider-neutral, read-only context worker for coding agents"
 license = "MIT"
@@ -12,6 +12,25 @@ categories = ["command-line-utilities", "development-tools"]
 [[bin]]
 name = "agent-shunt"
 path = "src/main.rs"
+
+[features]
+default = ["ast"]
+# Structure-aware AST chunking via tree-sitter. On by default; disable for a
+# smaller binary that falls back to the indentation heuristic everywhere.
+ast = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-c",
+    "dep:tree-sitter-cpp",
+    "dep:tree-sitter-ruby",
+    "dep:tree-sitter-bash",
+    "dep:tree-sitter-json",
+]
 
 [dependencies]
 anyhow = "1"
@@ -25,6 +44,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shell-words = "1"
 url = "2"
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.23", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-ruby = { version = "0.23", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -4,9 +4,13 @@ use anyhow::{Result, bail};
 
 use crate::{
     application::ports::{
-        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DocumentLoader,
+        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseIndex, DocumentLoader,
+        QueryExpander, Reranker, StructureResolver,
     },
-    domain::{Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
+    domain::{
+        DenseHit, Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk,
+        ScanResult,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -21,6 +25,14 @@ pub struct RetrieveInput {
     /// When set, restricts retrieval to locally changed files so a review
     /// question covers exactly what the caller touched, not the whole tree.
     pub scope: Option<ChangeScope>,
+    /// MMR relevance/diversity trade-off; defaults to [`MMR_LAMBDA`].
+    pub mmr_lambda: f64,
+    /// Largest enclosing block a hit may expand into; defaults to
+    /// [`MAX_BLOCK_LINES`].
+    pub max_block_lines: usize,
+    /// Relevance floor as a percentage of the top hit; defaults to
+    /// [`MIN_SCORE_PERCENT`].
+    pub min_score_percent: usize,
 }
 
 /// Restricts retrieval to locally changed files (tracked changes against a
@@ -38,12 +50,20 @@ const MAX_DIFF_TERM_TEXT: usize = 100_000;
 /// other hits from the same files by this factor.
 const SCOPE_HUNK_BOOST: usize = 3;
 
+/// Unscoped retrieval multiplies the score of hits in git-untracked (brand-new)
+/// files by this factor, so freshly written code is not buried under older files
+/// that share its vocabulary. Limited to untracked files: modified tracked files
+/// are already findable, and boosting them would make ranking depend on whatever
+/// happens to be uncommitted. Below [`SCOPE_HUNK_BOOST`]: a nudge for relevance,
+/// not the hard subject-of-review focus that `--diff` applies.
+const UNTRACKED_FILE_BOOST: usize = 2;
+
 /// Largest enclosing block a hit may expand into. Beyond this the block is a
 /// whole impl/class/file, not a focused unit, so the hit keeps its fixed
 /// context window instead. Sized to a generous function body: big enough to
 /// collapse a scatter of same-function windows into one chunk, bounded enough
 /// that one hit never swallows the budget.
-const MAX_BLOCK_LINES: usize = 48;
+pub const MAX_BLOCK_LINES: usize = 48;
 
 /// Most chunks any single file may contribute to the result. Generous enough
 /// that a genuinely file-localized question still gets deep coverage, tight
@@ -54,7 +74,7 @@ const MAX_CHUNKS_PER_FILE: usize = 6;
 /// MMR relevance/diversity trade-off. At 0.7 relevance leads, but a redundant
 /// chunk is still pushed down the order enough to lose its slot to fresh
 /// evidence under a tight budget.
-const MMR_LAMBDA: f64 = 0.7;
+pub const MMR_LAMBDA: f64 = 0.7;
 
 /// Floor similarity between two chunks of the same file, regardless of content
 /// overlap. Reproduces the one-per-path-first spread: another chunk of an
@@ -66,7 +86,7 @@ const SAME_PATH_SIM: f64 = 0.5;
 /// selection. The ranked tail of a broad question is weakly related — dozens
 /// of files can match faintly — and would otherwise fill the whole token
 /// budget with noise that never answers the question.
-const MIN_SCORE_PERCENT: usize = 15;
+pub const MIN_SCORE_PERCENT: usize = 15;
 
 /// Per-chunk cost of the JSON envelope the caller actually receives: field
 /// names, quotes, structure, newline escaping, and pretty-print whitespace,
@@ -91,13 +111,51 @@ const CLIFF_GAP_PERCENT: usize = 30;
 /// (which is almost always within the top few) while still trimming the shoulder.
 const MIN_CLIFF_FILES: usize = 3;
 
-/// Executes bounded retrieval under a strict evidence token budget: any
-/// retrieved chunk that does not fit the budget is skipped entirely, never
-/// truncated, so selected evidence is always complete source context.
+/// Reciprocal Rank Fusion smoothing constant. The standard value: it damps the
+/// weight of any single list's top ranks so neither the lexical nor the dense
+/// ranking dominates, and fusing on ranks sidesteps the incompatible score
+/// scales of BM25-style weights and cosine similarity.
+const RRF_K: f64 = 60.0;
+
+/// Most candidates sent to the LLM re-ranker. Reranking is the costly stage, so
+/// it is applied only to the head of the ranking (broad recall first, precise
+/// reranking of the top) — the standard two-stage design.
+const RERANK_TOP_K: usize = 20;
+
+/// Executes bounded retrieval with the dependency-free heuristic block
+/// resolver. The default entry point; [`execute_with_resolver`] injects an
+/// AST-backed resolver where one is available.
 pub fn execute(
     search: &dyn CodeSearch,
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
+    input: &RetrieveInput,
+) -> Result<(RetrieveResult, Vec<Document>)> {
+    execute_with_resolver(
+        search,
+        change_source,
+        loader,
+        &super::resolver::HeuristicResolver,
+        None,
+        None,
+        None,
+        input,
+    )
+}
+
+/// Executes bounded retrieval under a strict evidence token budget: any
+/// retrieved chunk that does not fit the budget is skipped entirely, never
+/// truncated, so selected evidence is always complete source context. The
+/// `resolver` snaps each hit to its enclosing block.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_resolver(
+    search: &dyn CodeSearch,
+    change_source: &dyn ChangeSource,
+    loader: &dyn DocumentLoader,
+    resolver: &dyn StructureResolver,
+    index: Option<&dyn DenseIndex>,
+    rerank: Option<&dyn Reranker>,
+    expander: Option<&dyn QueryExpander>,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
     super::scan::validate_question(&input.question, &input.limits)?;
@@ -150,6 +208,20 @@ pub fn execute(
         // EXCLUDED_GLOBS still apply, so secrets stay out).
         globs.extend(changes.iter().map(|change| change.path.clone()));
     }
+    // Optional query expansion: a chat model adds related terms (synonyms,
+    // likely identifiers) so the lexical search recovers code phrased in other
+    // words. Appended after the question's own terms, which keep priority in the
+    // bounded term set. Only the opt-in `--expand` path supplies an expander.
+    let search_question = if let Some(expander) = expander {
+        let extra = expander.expand(&input.question)?;
+        if extra.is_empty() {
+            search_question
+        } else {
+            format!("{search_question} {}", extra.join(" "))
+        }
+    } else {
+        search_question
+    };
     let terms = search.terms(&search_question);
     if terms.is_empty() {
         bail!("question contains no searchable terms");
@@ -162,6 +234,29 @@ pub fn execute(
                 && hit_in_changed_lines(hit, change)
             {
                 hit.score = hit.score.saturating_mul(SCOPE_HUNK_BOOST);
+            }
+        }
+    } else {
+        // Unscoped: surface brand-new code. A matching file that is git-untracked
+        // is likely the subject of the current work, yet its lower term frequency
+        // can bury it under older files with the same vocabulary. Boost hits on
+        // untracked paths only — modified tracked files are already findable, and
+        // boosting them would make ranking swing with whatever is uncommitted.
+        // Best-effort: only files that already matched are lifted, and outside a
+        // git work tree (or on error) nothing changes. The `.git` check avoids
+        // spawning git at all when the directory is not a repository.
+        if in_git_worktree(&input.cwd)
+            && let Ok(changes) = change_source.changes(&input.cwd, "HEAD")
+        {
+            let untracked = changes
+                .iter()
+                .filter(|change| change.whole_file)
+                .map(|change| change.path.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            for hit in &mut hits {
+                if untracked.contains(hit.path.as_str()) {
+                    hit.score = hit.score.saturating_mul(UNTRACKED_FILE_BOOST);
+                }
             }
         }
     }
@@ -204,13 +299,34 @@ pub fn execute(
         .iter()
         .map(|(path, _)| PathBuf::from(path))
         .collect::<Vec<_>>();
-    let loaded = if paths.is_empty() {
+    let mut loaded = if paths.is_empty() {
         crate::domain::LoadedDocuments {
             documents: Vec::new(),
             total_bytes: 0,
         }
     } else {
         loader.load(&input.cwd, &paths, &input.limits)?
+    };
+
+    // Optional dense recall: the persistent index returns whole-repo chunks the
+    // question matches by meaning. Their files are merged into the loaded set
+    // (so the analyze path can deliver them), and the hits are fused with the
+    // lexical ranking below.
+    let dense_hits = if let Some(index) = index {
+        let recall = index.recall(&input.question, &input.cwd, &globs, &input.limits)?;
+        for document in recall.documents {
+            if !loaded
+                .documents
+                .iter()
+                .any(|held| held.path == document.path)
+            {
+                loaded.total_bytes += document.bytes;
+                loaded.documents.push(document);
+            }
+        }
+        recall.hits
+    } else {
+        Vec::new()
     };
 
     let by_path = loaded
@@ -230,8 +346,13 @@ pub fn execute(
                 // function collapse to a single chunk instead of a scatter of
                 // overlapping fixed windows; fall back to the fixed window for
                 // top-level statements or blocks too large to be worth it.
-                let range = document
-                    .enclosing_block(*line, MAX_BLOCK_LINES)
+                let range = resolver
+                    .enclosing_block(
+                        std::path::Path::new(&document.path),
+                        &document.lines,
+                        *line,
+                        input.max_block_lines,
+                    )
                     .unwrap_or(LineRange {
                         start_line: line.saturating_sub(input.context_lines).max(1),
                         end_line: (*line + input.context_lines).min(document.line_count),
@@ -282,7 +403,21 @@ pub fn execute(
             .then_with(|| left.path.cmp(&right.path))
     });
 
+    // Optional semantic pass: fuse the lexical candidates with the dense index's
+    // recall so a chunk that answers the question by meaning — not by sharing its
+    // exact terms — can rise into the budget, including from files the lexical
+    // search never hit. Only the opt-in `--semantic` path supplies hits.
+    if !dense_hits.is_empty() {
+        fuse_dense(&mut candidates, &dense_hits, &by_path, input.budget_tokens);
+    }
     let available_count = candidates.len();
+    // Optional precise re-ranking: an LLM scores the head of the ranking for how
+    // directly each chunk answers the question, and the top is reordered by that
+    // score before the budget is packed. Costly, so it runs only on the top-k
+    // and only when `--rerank` supplies a reranker.
+    if let Some(rerank) = rerank {
+        rerank_candidates(rerank, &input.question, &mut candidates)?;
+    }
     // Relevance floor: drop the ranked tail whose score is a small fraction of
     // the top hit before anything is selected, so weakly-related files never
     // consume the token budget. `available_count` is captured above, so any
@@ -293,7 +428,7 @@ pub fn execute(
         .unwrap_or(0);
     if max_score > 0 {
         candidates.retain(|candidate| {
-            candidate.score.saturating_mul(100) >= max_score.saturating_mul(MIN_SCORE_PERCENT)
+            candidate.score.saturating_mul(100) >= max_score.saturating_mul(input.min_score_percent)
         });
     }
 
@@ -320,7 +455,7 @@ pub fn execute(
                 .iter()
                 .map(|&chosen| similarity(candidate, chosen, &candidates, &token_sets))
                 .fold(0.0_f64, f64::max);
-            let value = MMR_LAMBDA * relevance - (1.0 - MMR_LAMBDA) * redundancy;
+            let value = input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
             // Strict improvement keeps the earliest (higher-scoring, path-sorted)
             // candidate on ties, so ordering stays deterministic.
             if value > best_value + f64::EPSILON {
@@ -380,13 +515,26 @@ pub fn execute_analyzed(
     search: &dyn CodeSearch,
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
+    resolver: &dyn StructureResolver,
+    index: Option<&dyn DenseIndex>,
+    rerank: Option<&dyn Reranker>,
+    expander: Option<&dyn QueryExpander>,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
     input: &RetrieveInput,
     model: &str,
     fallback_models: &[String],
 ) -> Result<(ScanResult, usize, bool)> {
-    let (_, documents) = execute(search, change_source, loader, input)?;
+    let (_, documents) = execute_with_resolver(
+        search,
+        change_source,
+        loader,
+        resolver,
+        index,
+        rerank,
+        expander,
+        input,
+    )?;
     if documents.is_empty() {
         bail!("automatic retrieval found no relevant source chunks within the token budget");
     }
@@ -435,12 +583,194 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
         .collect()
 }
 
+/// Fuses the lexical candidate ranking with the dense index's recall via
+/// Reciprocal Rank Fusion. Each dense hit either boosts an overlapping lexical
+/// candidate or, when the lexical search never touched that region, joins the
+/// pool as a fresh candidate. The fused rank becomes each candidate's new score,
+/// so the downstream floor, MMR ordering, and budget packing all operate on the
+/// hybrid ranking without further change.
+fn fuse_dense(
+    candidates: &mut Vec<RetrievedChunk>,
+    hits: &[DenseHit],
+    by_path: &BTreeMap<String, &Document>,
+    budget: usize,
+) {
+    let lexical_rank = (0..candidates.len()).collect::<Vec<_>>();
+    let mut dense_rank = Vec::new();
+    // `hits` arrive sorted by descending similarity, so pushing in order yields
+    // the dense ranking directly.
+    for hit in hits {
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.path == hit.path && overlaps(candidate, hit))
+        {
+            if !dense_rank.contains(&index) {
+                dense_rank.push(index);
+            }
+            continue;
+        }
+        let Some(document) = by_path.get(&hit.path) else {
+            continue;
+        };
+        if hit.range.end_line > document.line_count {
+            continue;
+        }
+        let content = document.numbered_range(hit.range);
+        let estimated_tokens = delivered_tokens(&content, &hit.path);
+        // A chunk that cannot ever fit the budget is not worth ranking.
+        if estimated_tokens > budget {
+            continue;
+        }
+        candidates.push(RetrievedChunk {
+            path: hit.path.clone(),
+            start_line: hit.range.start_line,
+            end_line: hit.range.end_line,
+            score: 0,
+            estimated_tokens,
+            content,
+        });
+        dense_rank.push(candidates.len() - 1);
+    }
+    let fused = reciprocal_rank_fusion(&[lexical_rank, dense_rank], RRF_K);
+    let count = candidates.len();
+    for (position, (index, _)) in fused.iter().enumerate() {
+        // Fused rank -> descending integer score the rest of the pipeline reads.
+        // Scores become dense linear ranks, so the downstream `MIN_SCORE_PERCENT`
+        // floor trims by rank position here, not by ratio to the top term score —
+        // intended: after fusion the lexical magnitudes are no longer comparable.
+        candidates[*index].score = count - position;
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+}
+
+/// Whether a lexical candidate's line span overlaps a dense hit's, so the two
+/// refer to the same region and should count as one fused candidate.
+fn overlaps(candidate: &RetrievedChunk, hit: &DenseHit) -> bool {
+    candidate.start_line <= hit.range.end_line && hit.range.start_line <= candidate.end_line
+}
+
+/// Reorders the top-k candidates by an LLM relevance score, lifting them above
+/// the untouched tail so the budget packs the model-preferred chunks first. The
+/// tail keeps its ranking; only the head is re-judged, bounding the LLM cost.
+fn rerank_candidates(
+    rerank: &dyn Reranker,
+    question: &str,
+    candidates: &mut [RetrievedChunk],
+) -> Result<()> {
+    let head = candidates.len().min(RERANK_TOP_K);
+    if head < 2 {
+        return Ok(());
+    }
+    let texts = candidates[..head]
+        .iter()
+        .map(|candidate| candidate.content.clone())
+        .collect::<Vec<_>>();
+    let scores = rerank.scores(question, &texts)?;
+    if scores.len() != head {
+        bail!(
+            "reranker returned {} scores for {} candidates",
+            scores.len(),
+            head
+        );
+    }
+    // Order the head by descending relevance, ties broken by the prior rank so
+    // the reorder is stable and deterministic.
+    let mut order = (0..head).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| {
+        scores[right]
+            .partial_cmp(&scores[left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.cmp(&right))
+    });
+    // Score the head above the tail's best so its new order survives the final
+    // sort while the tail's relative ranking is preserved.
+    let tail_max = candidates
+        .get(head)
+        .map(|candidate| candidate.score)
+        .unwrap_or(0);
+    for (position, &index) in order.iter().enumerate() {
+        candidates[index].score = tail_max + head - position;
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+    Ok(())
+}
+
+/// Reciprocal Rank Fusion: combines several ranked lists (each a sequence of
+/// candidate indices, best first) into one, scoring every candidate by the sum
+/// of `1 / (k + rank)` across the lists it appears in. Returns `(index, score)`
+/// pairs sorted by fused score, ties broken by index for determinism.
+fn reciprocal_rank_fusion(lists: &[Vec<usize>], k: f64) -> Vec<(usize, f64)> {
+    let mut scores: BTreeMap<usize, f64> = BTreeMap::new();
+    for list in lists {
+        for (rank, &index) in list.iter().enumerate() {
+            *scores.entry(index).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+        }
+    }
+    let mut fused = scores.into_iter().collect::<Vec<_>>();
+    fused.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.0.cmp(&right.0))
+    });
+    fused
+}
+
 /// Tokens the caller actually pays for a chunk: its numbered content and path,
 /// plus the JSON envelope. Budgeting and the reported `estimatedTokens` both
 /// use this so the token budget matches the delivered footprint instead of
 /// undercounting by the envelope.
 fn delivered_tokens(content: &str, path: &str) -> usize {
-    (content.len() + path.len()).div_ceil(4) + ENVELOPE_TOKENS_PER_CHUNK
+    estimate_tokens(content) + estimate_tokens(path) + ENVELOPE_TOKENS_PER_CHUNK
+}
+
+/// Approximate BPE token count of delivered text. Word runs tokenize at roughly
+/// four characters each (min one token), symbol runs at two (dense punctuation
+/// only partly merges), and whitespace is free but breaks runs. This tracks a
+/// real tokenizer far better than a flat `len / 4`, which undercounts the
+/// symbol-dense punctuation of source code and so silently lets the token
+/// budget overshoot the delivered footprint. It errs conservative (never below
+/// a real count), so the budget is a ceiling the output cannot breach.
+fn estimate_tokens(text: &str) -> usize {
+    let mut tokens = 0usize;
+    let mut run = 0usize;
+    let mut run_is_word = false;
+    for character in text.chars() {
+        let is_word = character.is_alphanumeric() || character == '_';
+        let is_space = character.is_whitespace();
+        if is_space || is_word != run_is_word {
+            tokens += run_tokens(run, run_is_word);
+            run = 0;
+            run_is_word = is_word;
+        }
+        if !is_space {
+            run += 1;
+        }
+    }
+    tokens + run_tokens(run, run_is_word)
+}
+
+fn run_tokens(run: usize, is_word: bool) -> usize {
+    if run == 0 {
+        0
+    } else if is_word {
+        run.div_ceil(4).max(1)
+    } else {
+        run.div_ceil(2).max(1)
+    }
 }
 
 /// Lowercased identifier-ish tokens of a chunk's content, for redundancy
@@ -489,6 +819,19 @@ fn similarity(
     }
 }
 
+/// Whether `cwd`, or an ancestor, contains a `.git` entry — a cheap filesystem
+/// check that avoids spawning git for the changed-file boost outside a work tree.
+fn in_git_worktree(cwd: &std::path::Path) -> bool {
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        if current.join(".git").exists() {
+            return true;
+        }
+        dir = current.parent();
+    }
+    false
+}
+
 /// A hit counts as inside the change when the file is wholly new (`whole_file`,
 /// untracked) or the hit line falls inside a changed range. A tracked file
 /// whose diff is pure deletions has empty hunks but is *not* whole-file, so
@@ -512,12 +855,276 @@ mod tests {
 
     use anyhow::Result;
 
+    use std::collections::BTreeMap;
+
     use crate::{
         application::ports::{ChangeSource, CodeSearch, DocumentLoader},
-        domain::{Document, FileChange, Limits, LineRange, LoadedDocuments, SearchHit},
+        domain::{
+            DenseHit, Document, FileChange, Limits, LineRange, LoadedDocuments, RetrievedChunk,
+            SearchHit,
+        },
     };
 
-    use super::{ChangeScope, RetrieveInput, execute};
+    use super::{
+        ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput,
+        estimate_tokens, execute, fuse_dense, reciprocal_rank_fusion,
+    };
+
+    #[test]
+    fn reciprocal_rank_fusion_rewards_agreement_across_lists() {
+        // One list ranks A>B>C, the other C>A>B. A appears near the top of both,
+        // so it wins; C's single first place lifts it above B.
+        let fused = reciprocal_rank_fusion(&[vec![0, 1, 2], vec![2, 0, 1]], 60.0);
+        let order = fused.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(order, vec![0, 2, 1]);
+    }
+
+    struct MockRerank(Vec<f32>);
+    impl crate::application::ports::Reranker for MockRerank {
+        fn scores(&self, _question: &str, candidates: &[String]) -> Result<Vec<f32>> {
+            Ok(self.0[..candidates.len()].to_vec())
+        }
+    }
+
+    #[test]
+    fn rerank_lifts_the_model_preferred_chunk_to_the_top() {
+        // Lexical order a > b > c; the reranker judges c most relevant, so it
+        // must lead after reranking, the rest following its score order.
+        let chunk = |path: &str, score: usize| RetrievedChunk {
+            path: path.to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score,
+            estimated_tokens: 10,
+            content: format!("{path} body"),
+        };
+        let mut candidates = vec![chunk("a", 100), chunk("b", 90), chunk("c", 80)];
+        let rerank = MockRerank(vec![0.1, 0.2, 0.9]);
+        super::rerank_candidates(&rerank, "question", &mut candidates).unwrap();
+        let order = candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["c", "b", "a"]);
+    }
+
+    struct MockExpander(Vec<String>);
+    impl crate::application::ports::QueryExpander for MockExpander {
+        fn expand(&self, _question: &str) -> Result<Vec<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn expansion_appends_terms_to_the_lexical_search() {
+        struct RecordingSearch(Mutex<String>);
+        impl CodeSearch for RecordingSearch {
+            fn terms(&self, question: &str) -> Vec<String> {
+                vec![question.to_owned()]
+            }
+            fn search(
+                &self,
+                _root: &Path,
+                question: &str,
+                _max: usize,
+                _globs: &[String],
+            ) -> Result<Vec<SearchHit>> {
+                *self.0.lock().unwrap() = question.to_owned();
+                Ok(vec![SearchHit {
+                    path: "a.rs".to_owned(),
+                    line: 1,
+                    score: 5,
+                    matched_terms: 1,
+                }])
+            }
+            fn available(&self) -> bool {
+                true
+            }
+        }
+        struct OneDoc;
+        impl DocumentLoader for OneDoc {
+            fn load(&self, _r: &Path, _p: &[PathBuf], _l: &Limits) -> Result<LoadedDocuments> {
+                Ok(LoadedDocuments {
+                    total_bytes: 20,
+                    documents: vec![Document {
+                        path: "a.rs".to_owned(),
+                        bytes: 20,
+                        line_count: 1,
+                        lines: vec!["fn a() { work(); }".to_owned()],
+                        numbered_content: String::new(),
+                        allowed_ranges: Vec::new(),
+                    }],
+                })
+            }
+        }
+        let search = RecordingSearch(Mutex::new(String::new()));
+        let expander = MockExpander(vec!["synonymterm".to_owned()]);
+        let resolver = crate::application::resolver::HeuristicResolver;
+        super::execute_with_resolver(
+            &search,
+            &Changes(Vec::new()),
+            &OneDoc,
+            &resolver,
+            None,
+            None,
+            Some(&expander),
+            &input(),
+        )
+        .unwrap();
+        let recorded = search.0.lock().unwrap().clone();
+        assert!(
+            recorded.contains("synonymterm"),
+            "expanded term missing from search: {recorded}"
+        );
+        assert!(
+            recorded.contains("needle"),
+            "original term dropped: {recorded}"
+        );
+    }
+
+    #[test]
+    fn unscoped_retrieval_boosts_hits_in_changed_files() {
+        struct TwoHitSearch;
+        impl CodeSearch for TwoHitSearch {
+            fn terms(&self, _: &str) -> Vec<String> {
+                vec!["needle".to_owned()]
+            }
+            fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
+                Ok(vec![
+                    SearchHit {
+                        path: "old.rs".to_owned(),
+                        line: 1,
+                        score: 10,
+                        matched_terms: 1,
+                    },
+                    SearchHit {
+                        path: "new.rs".to_owned(),
+                        line: 1,
+                        score: 6,
+                        matched_terms: 1,
+                    },
+                ])
+            }
+            fn available(&self) -> bool {
+                true
+            }
+        }
+        struct TwoDocs;
+        impl DocumentLoader for TwoDocs {
+            fn load(&self, _: &Path, _: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
+                let doc = |path: &str| Document {
+                    path: path.to_owned(),
+                    bytes: 8,
+                    line_count: 1,
+                    lines: vec!["needle".to_owned()],
+                    numbered_content: String::new(),
+                    allowed_ranges: Vec::new(),
+                };
+                Ok(LoadedDocuments {
+                    total_bytes: 16,
+                    documents: vec![doc("old.rs"), doc("new.rs")],
+                })
+            }
+        }
+        // new.rs is untracked; its raw score (6) is below old.rs (10), but the
+        // changed-file boost (x2 -> 12) lifts it above.
+        let changed = Changes(vec![FileChange {
+            path: "new.rs".to_owned(),
+            hunks: Vec::new(),
+            whole_file: true,
+            changed_lines: "needle".to_owned(),
+        }]);
+        let resolver = crate::application::resolver::HeuristicResolver;
+        let input = RetrieveInput {
+            budget_tokens: 1000,
+            context_lines: 0,
+            ..input()
+        };
+        let (result, _) = super::execute_with_resolver(
+            &TwoHitSearch,
+            &changed,
+            &TwoDocs,
+            &resolver,
+            None,
+            None,
+            None,
+            &input,
+        )
+        .unwrap();
+        let order = result
+            .chunks
+            .iter()
+            .map(|chunk| chunk.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order.first(),
+            Some(&"new.rs"),
+            "changed file not boosted above older match: {order:?}"
+        );
+    }
+
+    #[test]
+    fn dense_fusion_injects_a_new_chunk_and_boosts_it() {
+        // Lexical pool holds a.rs and b.rs. The dense index recalls c.rs (a file
+        // the lexical search never hit) as its top match, so fusion must inject
+        // c.rs and rank it above the lexically weaker b.rs.
+        let chunk = |path: &str, score: usize| RetrievedChunk {
+            path: path.to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score,
+            estimated_tokens: 10,
+            content: format!("{path} body"),
+        };
+        let mut candidates = vec![chunk("a.rs", 100), chunk("b.rs", 90)];
+        let doc = Document {
+            path: "c.rs".to_owned(),
+            bytes: 12,
+            line_count: 1,
+            lines: vec!["dense body".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let mut by_path: BTreeMap<String, &Document> = BTreeMap::new();
+        by_path.insert("c.rs".to_owned(), &doc);
+        let hits = vec![DenseHit {
+            path: "c.rs".to_owned(),
+            range: LineRange {
+                start_line: 1,
+                end_line: 1,
+            },
+            similarity: 0.9,
+        }];
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000);
+        assert!(
+            candidates.iter().any(|candidate| candidate.path == "c.rs"),
+            "dense-only chunk was not injected"
+        );
+        let order = candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>();
+        // a.rs leads both rankings; c.rs (dense #1) outranks b.rs.
+        assert_eq!(order[0], "a.rs");
+        let c_pos = order.iter().position(|&p| p == "c.rs").unwrap();
+        let b_pos = order.iter().position(|&p| p == "b.rs").unwrap();
+        assert!(
+            c_pos < b_pos,
+            "dense recall did not outrank weak lexical: {order:?}"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_counts_symbol_dense_code_above_a_flat_quarter() {
+        // Punctuation-heavy code tokenizes near 1:1, so the estimate must exceed
+        // the old `len / 4`, which undercounted and let the budget overshoot.
+        let code = "let x = foo(a, b).bar()?;";
+        assert!(estimate_tokens(code) > code.len() / 4);
+        // Whitespace is free: indentation does not inflate the count.
+        assert_eq!(estimate_tokens("   word"), estimate_tokens("word"));
+        // A lone word stays cheap.
+        assert_eq!(estimate_tokens("path"), 1);
+    }
 
     struct Search {
         globs: Mutex<Vec<Vec<String>>>,
@@ -602,6 +1209,9 @@ mod tests {
             max_hits: 10,
             globs: Vec::new(),
             scope: None,
+            mmr_lambda: MMR_LAMBDA,
+            max_block_lines: MAX_BLOCK_LINES,
+            min_score_percent: MIN_SCORE_PERCENT,
         }
     }
 
@@ -715,10 +1325,11 @@ mod tests {
 
     #[test]
     fn mmr_prefers_a_distinct_chunk_over_a_higher_scoring_near_duplicate() {
-        // Budget fits exactly two chunks. Score order would take a.rs then its
-        // near-duplicate b.rs; MMR takes a.rs then the distinct c.rs instead.
+        // Budget fits exactly two of the three equal-cost chunks. Score order
+        // would take a.rs then its near-duplicate b.rs; MMR takes a.rs then the
+        // distinct c.rs instead.
         let tight = RetrieveInput {
-            budget_tokens: 108,
+            budget_tokens: 130,
             context_lines: 0,
             ..input()
         };

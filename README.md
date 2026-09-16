@@ -81,6 +81,22 @@ agent-shunt retrieve --question "Where is auth enforced?" --dir .
 # Same, then ask the model about exactly that evidence
 agent-shunt retrieve --analyze --question "Where is auth enforced?" --dir .
 
+# Opt-in query expansion: a chat model adds related search terms (login,
+# session, token…) so the local search finds code phrased differently. Works
+# with any chat provider — no embeddings endpoint needed.
+agent-shunt retrieve --expand --question "Where is auth enforced?" --dir .
+
+# Opt-in hybrid retrieval: a persistent embedding index recalls chunks from
+# across the whole repo by meaning, fused with the local lexical ranking, so
+# relevant code surfaces even from files the term search never hit. Needs an
+# embeddingModel in config; vectors are cached on disk per file + model.
+agent-shunt retrieve --semantic --question "Where is auth enforced?" --dir .
+
+# Opt-in precise re-ranking: the worker model scores the top candidates for
+# how directly they answer the question and reorders them. Combine with
+# --semantic for broad recall then precise reranking.
+agent-shunt retrieve --semantic --rerank --question "Where is auth enforced?" --dir .
+
 # Analyze files you picked yourself
 agent-shunt scan --question "Summarize this module" --path src/main.rs
 
@@ -90,13 +106,33 @@ agent-shunt doctor    # full local health report
 agent-shunt metrics   # aggregate usage and cost
 ```
 
-`retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`.
+`retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`, `--expand`, `--semantic`, `--rerank`. Retrieval tuning: `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` (also `mmrLambda`/`maxBlockLines`/`minScorePercent` config keys; CLI wins).
+
+Three opt-in ways to search by meaning, not just by term — pick by what your provider offers:
+
+- **`--expand`** — a chat model suggests related terms (synonyms, likely identifiers) that widen the lexical search. Cheapest, needs only a chat model (works with OpenRouter). Set `expandByDefault: true` in config to make it *your* default (the shipped default stays local).
+- **`--semantic`** — a persistent, disk-cached embedding index over the whole repository recalls code the term search missed, fused with the lexical ranking (RRF). Higher quality; needs a provider that serves `/embeddings`. Vectors cache under `~/.cache/agent-shunt/index`, keyed by file content and model, so only changed files are re-embedded.
+- **`--rerank`** — the worker model scores the top candidates for how directly they answer the question and reorders them. Precision stage; combine with `--expand`/`--semantic` for the standard recall-then-rerank design.
+
+All three send content to a provider; the default `retrieve` stays fully local (no network, no key).
+
+**Reviewing new or changed code?** Use `--diff` to scope retrieval to exactly what you touched — tracked modifications **and untracked new files** — against a base ref (bare `--diff` uses HEAD):
+
+```bash
+agent-shunt retrieve --diff --question "what did this change break?" --dir .
+agent-shunt retrieve --diff origin/main --question "review these changes" --dir .
+```
+
+Even without `--diff`, plain `retrieve` gives a modest ranking boost to matching files that are git-untracked (brand-new), so freshly written code is not buried under older files that share its vocabulary.
+
+Chunks snap to their enclosing definition — the function, method, or class with its signature, decorators, and doc-comments — via tree-sitter (Rust, Python, JS/TS/TSX, Go, Java, C/C++, Ruby, Bash, JSON), falling back to a language-agnostic indentation heuristic elsewhere. Build with `--no-default-features` to drop tree-sitter and use the heuristic everywhere.
 
 ## Privacy and safety
 
 - **Read-only.** Never writes to your repository.
-- **The model sees only the selected chunks**, never your whole repo.
-- **On OpenRouter**, every request enforces Zero Data Retention routing, blocks data-collecting and `:free` routes. On any other provider, their data policy is between you and them.
+- **`retrieve` is fully local by default**: no network, no API key. `--analyze`, `scan`, and the opt-in `--semantic` pass are the only paths that reach a provider.
+- **The model sees only the selected chunks**, never your whole repo. `--semantic` sends candidate chunks to your embeddings endpoint and `--rerank` sends the top candidates to the worker model, each under its data policy; the default retrieval never leaves your machine.
+- **On OpenRouter**, every request — worker and embeddings alike — enforces Zero Data Retention routing and blocks data-collecting and `:free` routes. On any other provider, their data policy is between you and them.
 - **Credentials never travel in cleartext**: plain `http` endpoints are limited to localhost and private networks. Redirects and environment proxies are ignored.
 - **Your key stays local**: read at runtime, never printed, logged, or written to metrics. Metrics are aggregates only (status, model, timing, tokens, cost) — never questions, code, or answers.
 - **Everything is bounded**: request and response sizes, token counts, file counts, timeouts.
@@ -115,6 +151,9 @@ Optional `~/.config/agent-shunt/config.json`:
   "responseFormat": "json_schema",
   "disableReasoning": true,
   "extraBody": { "top_p": 0.1 },
+  "embeddingModel": "text-embedding-3-small",
+  "embeddingBaseUrl": "https://api.openai.com/v1",
+  "embeddingApiKeyEnv": "OPENAI_API_KEY",
   "codexHomes": ["~/.codex"],
   "claudeHomes": ["~/.claude"]
 }
@@ -126,6 +165,9 @@ Optional `~/.config/agent-shunt/config.json`:
 - `responseFormat` — `json_schema` (strict, when the provider supports it) or `json_object`. Output parsing is lenient in either mode: unknown keys are ignored, missing fields default, and a scalar where a list is expected is coerced — so loosely-conforming `json_object` providers still work, while claim validation stays local.
 - `disableReasoning` — set `true` for reasoning models so they answer directly (this tool does grounded extraction, not deliberation). Auto-injects the provider's disable-thinking parameter: z.ai `thinking:{type:disabled}`, Qwen/DashScope `enable_thinking:false`, otherwise OpenRouter-style `reasoning:{enabled:false}`.
 - `extraBody` — a JSON object merged into every request body, applied last so it overrides any tool default (including the reasoning field above). The escape hatch for any provider parameter the built-ins don't cover.
+- `embeddingModel` — enables `--semantic`. Point `embeddingBaseUrl` at a provider that serves `/embeddings` (OpenAI, or a local Ollama/LM Studio) — **OpenRouter does not**, so `embeddingBaseUrl` usually differs from `baseUrl` even though it defaults to it. The key resolves like the worker's, or via `embeddingApiKeyEnv`. A local endpoint (Ollama `nomic-embed-text`) keeps `--semantic` keyless and on-machine.
+- `expandByDefault` — set `true` to apply `--expand` (LLM query expansion) on every `retrieve`. Off by default so the shipped default stays local; the CLI `--expand` flag enables it per-invocation regardless.
+- Retrieval tuning `mmrLambda` / `maxBlockLines` / `minScorePercent` override the built-in defaults; the matching CLI flags win over config.
 - Numeric knobs (`timeoutMs`, `maxOutputTokens`, size/file caps) are also accepted; defaults are sane.
 
 CLI model overrides (`--model`) beat stored config.

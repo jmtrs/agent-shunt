@@ -5,20 +5,44 @@ use serde_json::{Value, json};
 
 use crate::{
     adapters::{
-        claude_install::ClaudeInstaller, codex_install::CodexInstaller,
-        credentials::EnvironmentCredentials, filesystem::SecureFilesystem,
-        gemini_install::GeminiInstaller, git::GitChangeSource, metrics::JsonlMetrics,
-        openai_compatible::OpenAiCompatibleWorker, opencode_install::OpencodeInstaller,
-        repo_install::RepoInstaller, ripgrep::RipgrepSearch,
+        claude_install::ClaudeInstaller,
+        codex_install::CodexInstaller,
+        credentials::EnvironmentCredentials,
+        embedding_index::EmbeddingIndex,
+        filesystem::SecureFilesystem,
+        gemini_install::GeminiInstaller,
+        git::GitChangeSource,
+        metrics::JsonlMetrics,
+        openai_compatible::{
+            EmbeddingClient, LlmQueryExpander, LlmReranker, OpenAiCompatibleWorker,
+        },
+        opencode_install::OpencodeInstaller,
+        repo_install::RepoInstaller,
+        ripgrep::RipgrepSearch,
     },
     application::{
-        ports::{CodeSearch, CredentialResolver, HostInstaller, MetricsSink},
+        ports::{
+            CodeSearch, CredentialResolver, DenseIndex, HostInstaller, MetricsSink, QueryExpander,
+            Reranker,
+        },
         retrieve::{self, RetrieveInput},
         scan::{self, ScanInput},
     },
     config::Config,
     domain::{MetricRecord, Usage},
 };
+
+/// Dense chunks the index recalls per question, fused with the lexical ranking.
+/// Bounded so the fusion pool stays small and the budget still leads.
+const INDEX_TOP_K: usize = 24;
+
+/// The structure resolver wired into retrieval: the AST-backed resolver when
+/// the `ast` feature is on, the dependency-free heuristic otherwise. Both
+/// implement [`crate::application::ports::StructureResolver`].
+#[cfg(feature = "ast")]
+type BlockResolver = crate::adapters::tree_sitter_chunker::AstResolver;
+#[cfg(not(feature = "ast"))]
+type BlockResolver = crate::application::resolver::HeuristicResolver;
 
 /// Repo-level instruction host selected on the `install` subcommand.
 pub enum RepoHost {
@@ -33,6 +57,7 @@ pub struct Application {
     filesystem: SecureFilesystem,
     search: RipgrepSearch,
     changes: GitChangeSource,
+    resolver: BlockResolver,
     metrics: JsonlMetrics,
     codex_installer: CodexInstaller,
     claude_installer: ClaudeInstaller,
@@ -64,6 +89,7 @@ impl Default for Application {
             filesystem: SecureFilesystem,
             search: RipgrepSearch,
             changes: GitChangeSource,
+            resolver: BlockResolver::default(),
             metrics: JsonlMetrics::new(JsonlMetrics::default_path()),
             codex_installer: CodexInstaller::new(default_executable()),
             claude_installer: ClaudeInstaller::new(default_executable()),
@@ -132,8 +158,113 @@ impl Application {
         result.map(|result| result.value)
     }
 
-    pub fn retrieve(&self, input: RetrieveInput, analyze: bool, config: &Config) -> Result<Value> {
+    /// Builds the embeddings client for `--semantic`. Requires an
+    /// `embeddingModel`; the base URL defaults to the worker's, and the key
+    /// resolves like the worker's (optionally via `embeddingApiKeyEnv`). Returns
+    /// an error rather than silently degrading, since the flag was explicit.
+    fn embedding_client_for(&self, config: &Config) -> Result<(EmbeddingClient, String)> {
+        let model = config.embedding_model.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--semantic requires an embeddingModel in config (~/.config/agent-shunt/config.json)"
+            )
+        })?;
+        let base_url = config
+            .embedding_base_url
+            .clone()
+            .unwrap_or_else(|| config.base_url.clone());
+        let local = crate::config::is_local_base_url(&base_url);
+        let credentials = EnvironmentCredentials::new(
+            config.api_key.clone(),
+            config
+                .embedding_api_key_env
+                .clone()
+                .or_else(|| config.api_key_env.clone()),
+            local,
+        );
+        let api_key = credentials.resolve()?.api_key;
+        let client = EmbeddingClient::new(&base_url, &model, &api_key, config.limits.clone());
+        Ok((client, model))
+    }
+
+    /// Directory holding the persistent embedding index (vectors cached per file
+    /// content and model), under the platform cache dir.
+    fn index_cache_dir() -> std::path::PathBuf {
+        dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("agent-shunt")
+            .join("index")
+    }
+
+    /// Builds the opt-in LLM re-ranker for `--rerank`, reusing the worker's
+    /// model, base URL, and credentials.
+    fn reranker_for(&self, config: &Config) -> Result<LlmReranker> {
+        let api_key = self.credentials_for(config).resolve()?.api_key;
+        Ok(LlmReranker::new(
+            &config.base_url,
+            &config.model,
+            &api_key,
+            config.disable_reasoning,
+            config.extra_body.clone(),
+            config.limits.clone(),
+        ))
+    }
+
+    /// Builds the opt-in LLM query expander for `--expand`, reusing the worker's
+    /// model, base URL, and credentials.
+    fn expander_for(&self, config: &Config) -> Result<LlmQueryExpander> {
+        let api_key = self.credentials_for(config).resolve()?.api_key;
+        Ok(LlmQueryExpander::new(
+            &config.base_url,
+            &config.model,
+            &api_key,
+            config.disable_reasoning,
+            config.extra_body.clone(),
+            config.limits.clone(),
+        ))
+    }
+
+    pub fn retrieve(
+        &self,
+        input: RetrieveInput,
+        analyze: bool,
+        semantic: bool,
+        rerank: bool,
+        expand: bool,
+        config: &Config,
+    ) -> Result<Value> {
         let started = Instant::now();
+        // `--expand` on the CLI, or `expandByDefault` in the user's own config.
+        let expand = expand || config.expand_by_default;
+        // The embeddings client and the index that borrows it must outlive the
+        // execute call, so both are bound here before use.
+        let embeddings = if semantic {
+            Some(self.embedding_client_for(config)?)
+        } else {
+            None
+        };
+        let index = embeddings.as_ref().map(|(client, model)| {
+            EmbeddingIndex::new(
+                client,
+                &self.resolver,
+                Self::index_cache_dir(),
+                model,
+                INDEX_TOP_K,
+                input.max_block_lines,
+            )
+        });
+        let index = index.as_ref().map(|index| index as &dyn DenseIndex);
+        let reranker = if rerank {
+            Some(self.reranker_for(config)?)
+        } else {
+            None
+        };
+        let reranker = reranker.as_ref().map(|ranker| ranker as &dyn Reranker);
+        let expander = if expand {
+            Some(self.expander_for(config)?)
+        } else {
+            None
+        };
+        let expander = expander.as_ref().map(|e| e as &dyn QueryExpander);
         let result = if analyze {
             let credentials = self.credentials_for(config);
             let worker = self.worker_for(config);
@@ -141,6 +272,10 @@ impl Application {
                 &self.search,
                 &self.changes,
                 &self.filesystem,
+                &self.resolver,
+                index,
+                reranker,
+                expander,
                 &credentials,
                 &worker,
                 &input,
@@ -162,28 +297,52 @@ impl Application {
                 })
             })
         } else {
-            retrieve::execute(&self.search, &self.changes, &self.filesystem, &input).and_then(
-                |(retrieval_result, documents)| {
-                    let input_bytes = documents.iter().map(|document| document.bytes).sum();
-                    let files = documents.len();
-                    // Savings = the whole loaded files versus the tokens returned.
-                    let baseline_bytes = retrieval_result.baseline_bytes;
-                    let delivered_tokens = retrieval_result.estimated_tokens;
-                    Ok(RecordedResult {
-                        value: serde_json::to_value(retrieval_result)?,
-                        input_bytes,
-                        files,
-                        usage: None,
-                        model: None,
-                        fallback: false,
-                        baseline_bytes,
-                        delivered_tokens,
-                    })
-                },
+            retrieve::execute_with_resolver(
+                &self.search,
+                &self.changes,
+                &self.filesystem,
+                &self.resolver,
+                index,
+                reranker,
+                expander,
+                &input,
             )
+            .and_then(|(retrieval_result, documents)| {
+                let input_bytes = documents.iter().map(|document| document.bytes).sum();
+                let files = documents.len();
+                // Savings = the whole loaded files versus the tokens returned.
+                let baseline_bytes = retrieval_result.baseline_bytes;
+                let delivered_tokens = retrieval_result.estimated_tokens;
+                Ok(RecordedResult {
+                    value: serde_json::to_value(retrieval_result)?,
+                    input_bytes,
+                    files,
+                    usage: None,
+                    model: None,
+                    fallback: false,
+                    baseline_bytes,
+                    delivered_tokens,
+                })
+            })
         };
+        // Tag the metric with the opt-in modifiers so the `--semantic`/`--rerank`
+        // and `--analyze` paths are counted and timed distinctly in the history,
+        // rather than blurred into one "retrieve" bucket.
+        let mut operation = String::from("retrieve");
+        if expand {
+            operation.push_str("+expand");
+        }
+        if semantic {
+            operation.push_str("+semantic");
+        }
+        if rerank {
+            operation.push_str("+rerank");
+        }
+        if analyze {
+            operation.push_str("+analyze");
+        }
         self.record_result(
-            "retrieve",
+            &operation,
             analyze.then_some(config.model.as_str()),
             started,
             &result,
