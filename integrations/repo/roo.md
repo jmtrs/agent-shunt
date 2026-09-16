@@ -10,7 +10,7 @@ agent-shunt retrieve --question "<current task>" --dir "<repository root>"
 
 Inspect the returned line-numbered chunks. Treat ranking and prose as hints; source ranges are evidence.
 
-When the selected context still needs synthesis:
+Comes back thin? Escalate cheapest-first (each calls a provider): `--expand` adds related search terms, `--semantic` recalls the whole repo by embeddings, `--rerank` reorders the top chunks, `--analyze` synthesizes an answer with locally validated citations:
 
 ```bash
 agent-shunt retrieve --analyze --question "<current task>" --dir "<repository root>"

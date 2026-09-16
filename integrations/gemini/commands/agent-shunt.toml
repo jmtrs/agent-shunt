@@ -8,7 +8,7 @@ agent-shunt retrieve --question "<the task or question>" --dir "<repository root
 
 Inspect the returned line-numbered chunks. Treat ranking and prose as hints; source ranges are evidence.
 
-When the selected context still needs synthesis, add --analyze to get a low-cost worker summary whose file and line references are locally validated:
+If a search comes back thin, escalate cheapest-first (each calls a provider): --expand adds related search terms, --semantic recalls the whole repo by embeddings, --rerank reorders the top chunks, and --analyze synthesizes an answer whose file and line references are locally validated:
 
 agent-shunt retrieve --analyze --question "<the task or question>" --dir "<repository root>"
 

@@ -1,25 +1,35 @@
 ---
 name: agent-shunt
-description: Retrieve and analyze bounded code context with the local agent-shunt CLI. Use for broad code-location questions, module summaries, call tracing, related-test discovery, log analysis, or when a whole file would otherwise be read. Prefer targeted native reads for known symbols or explicit line ranges.
+description: Retrieve bounded, line-numbered code context with the local agent-shunt CLI instead of reading files wholesale or grepping blindly. Reach for this FIRST on any where/how/what-handles question, module summary, call trace, PR/diff review, or related-test/log lookup — any time you would otherwise open several files or scan a large one. Escalate inside the tool (--expand, --semantic, --rerank, --analyze) rather than falling back to manual reads. Only skip it for a single file whose exact path and line range you already know.
 ---
 
 # Agent Shunt
 
-Use deterministic retrieval first:
+Default to `retrieve` before opening files or running your own grep — for any "where/how/what does X" question, module summary, call trace, PR review, or related-test/log hunt:
 
 ```bash
 agent-shunt retrieve --question "<current task>" --dir "<repository root>"
 ```
 
-Inspect the returned line-numbered chunks. Treat ranking and prose as hints; source ranges are evidence.
+It returns ranked, line-numbered `chunks[]` within a token budget, found locally and free. Inspect them; treat ranking and prose as hints, the source ranges as evidence.
 
-Use the worker (costs money — remote API) only when the selected context still needs synthesis:
+## Which command — escalate cheapest first
+
+Start at rung 1. Climb only if the previous rung comes back thin. Rungs 2–5 call a provider (cost money) like `--analyze`; rung 1 is free and local.
+
+1. **`retrieve`** — free, local, zero-network. The default for every exploration.
+2. **`--expand`** — a chat model adds related terms (synonyms, likely identifiers) so the search finds code phrased differently. Works with any chat provider; cheapest escalation.
+3. **`--semantic`** — a whole-repo embedding index recalls code the term search missed. Needs a provider that serves `/embeddings`. Higher recall.
+4. **`--rerank`** — the model reorders the top chunks for precision. Combine with `--expand`/`--semantic`.
+5. **`--analyze`** — the model synthesizes an answer from the selected chunks, with locally validated file/line citations. Use only when the chunks alone do not answer it; do not re-run on the same question.
 
 ```bash
-agent-shunt retrieve --analyze --question "<current task>" --dir "<repository root>"
+agent-shunt retrieve --expand --question "<task>" --dir "<repo>"              # +related terms
+agent-shunt retrieve --semantic --rerank --question "<task>" --dir "<repo>"   # recall then precision
+agent-shunt retrieve --analyze --question "<task>" --dir "<repo>"             # synthesized answer
 ```
 
-Run deterministic `retrieve` (free) first; escalate to `--analyze` only if the chunks alone do not answer the question. Do not re-run `--analyze` on the same question.
+Only skip the tool for a single file whose exact path and line range you already know — then a ranged read is cheaper.
 
 ## Scope retrieval to changed files
 
@@ -50,17 +60,7 @@ Do not pass secrets, generated artifacts, databases, binaries, or unrelated file
 
 ## Tuning
 
-`--budget-tokens` (default 12000), `--context-lines` (default 8), `--max-hits` (default 200), `--model <id>` override the retrieval envelope when chunks are truncated or the repo is large. `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` tune diversity, chunk size, and the relevance floor.
-
-Three opt-in escalations cost money like `--analyze` (they call a provider) — use only when free lexical retrieval misses code that matches by meaning rather than by exact terms:
-
-```bash
-agent-shunt retrieve --expand   --question "..." --dir "<repo>"   # chat model adds related search terms (any provider)
-agent-shunt retrieve --semantic --question "..." --dir "<repo>"   # dense whole-repo recall (needs embeddingModel in config)
-agent-shunt retrieve --rerank   --question "..." --dir "<repo>"   # worker model reorders the top chunks
-```
-
-Prefer plain `retrieve` first; reach for `--expand` (cheapest, chat-only), then `--semantic`/`--rerank`, only when it comes back thin.
+If retrieval truncates or the repo is large, widen the envelope: `--budget-tokens` (default 12000), `--context-lines` (default 8), `--max-hits` (default 200), `--model <id>`. `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` tune diversity, chunk size, and the relevance floor.
 
 ## Output contract — verify, do not trust
 
