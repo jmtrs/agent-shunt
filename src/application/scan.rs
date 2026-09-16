@@ -118,10 +118,12 @@ pub fn execute(
         &input.limits,
         &input.model,
         &input.fallback_models,
+        false,
     )?;
     Ok((result, loaded.total_bytes, fallback))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_documents(
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
@@ -130,6 +132,7 @@ pub fn analyze_documents(
     limits: &Limits,
     primary_model: &str,
     fallback_models: &[String],
+    review: bool,
 ) -> Result<(ScanResult, bool)> {
     let credential = credentials.resolve()?;
     let models = std::iter::once(primary_model.trim())
@@ -165,6 +168,7 @@ pub fn analyze_documents(
                 question: question.trim().to_owned(),
                 documents: documents.to_vec(),
                 limits: attempt_limits,
+                review,
             },
             &credential.api_key,
         );
@@ -632,6 +636,7 @@ mod tests {
             &Limits::default(),
             "primary",
             &["fallback".to_owned()],
+            false,
         )
         .unwrap();
         assert!(fallback);
@@ -679,6 +684,7 @@ mod tests {
             &limits,
             "primary",
             &["fallback".to_owned()],
+            false,
         );
         let timeouts = worker.timeouts.lock().unwrap();
         assert_eq!(timeouts.len(), 2);

@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+};
 
 use anyhow::{Result, bail};
 
@@ -33,6 +36,16 @@ pub struct RetrieveInput {
     /// Relevance floor as a percentage of the top hit; defaults to
     /// [`MIN_SCORE_PERCENT`].
     pub min_score_percent: usize,
+    /// Annotate each chunk with why it was retrieved (lexical vs dense source,
+    /// matched query terms). Off by default so the output contract is unchanged.
+    pub why: bool,
+    /// Pseudo-relevance feedback: mine distinctive identifiers from the
+    /// top-ranked files of a first lexical pass and fold them into the search,
+    /// so the origin symbol the caller never named still surfaces. No provider.
+    pub prf: bool,
+    /// Analyze with the reviewer prompt (find risks) instead of the analyst
+    /// prompt (answer the question). Only meaningful on the `--analyze` path.
+    pub review: bool,
 }
 
 /// Restricts retrieval to locally changed files (tracked changes against a
@@ -222,6 +235,21 @@ pub fn execute_with_resolver(
     } else {
         search_question
     };
+    // Optional pseudo-relevance feedback: a first lexical pass surfaces the
+    // files that best match, and the distinctive identifiers concentrated there
+    // are folded back into the search so the origin symbol the question never
+    // named (a helper, a field) is recovered on the real pass. Local-only: it
+    // reuses ripgrep and a bounded read of the leader files, no provider.
+    let search_question = if input.prf {
+        let mined = prf_terms(search, loader, input, &search_question, &globs)?;
+        if mined.is_empty() {
+            search_question
+        } else {
+            format!("{search_question} {}", mined.join(" "))
+        }
+    } else {
+        search_question
+    };
     let terms = search.terms(&search_question);
     if terms.is_empty() {
         bail!("question contains no searchable terms");
@@ -261,7 +289,11 @@ pub fn execute_with_resolver(
         }
     }
     let mut grouped: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    // Which query terms each file matched, OR-ed across its hits, kept for the
+    // `--why` provenance annotation (bit i of the mask is `terms[i]`).
+    let mut coverage: BTreeMap<String, u16> = BTreeMap::new();
     for hit in hits {
+        *coverage.entry(hit.path.clone()).or_default() |= hit.matched_terms;
         grouped
             .entry(hit.path)
             .or_default()
@@ -383,6 +415,17 @@ pub fn execute_with_resolver(
             }
             merged.push((range, score));
         }
+        let (source, matched_terms) = if input.why {
+            (
+                Some("lexical".to_owned()),
+                Some(decode_terms(
+                    coverage.get(&path).copied().unwrap_or(0),
+                    &terms,
+                )),
+            )
+        } else {
+            (None, None)
+        };
         for (range, score) in merged {
             let content = document.numbered_range(range);
             let estimated_tokens = delivered_tokens(&content, &path);
@@ -393,6 +436,8 @@ pub fn execute_with_resolver(
                 score: score * 10 + file_score,
                 estimated_tokens,
                 content,
+                source: source.clone(),
+                matched_terms: matched_terms.clone(),
             });
         }
     }
@@ -408,7 +453,13 @@ pub fn execute_with_resolver(
     // exact terms — can rise into the budget, including from files the lexical
     // search never hit. Only the opt-in `--semantic` path supplies hits.
     if !dense_hits.is_empty() {
-        fuse_dense(&mut candidates, &dense_hits, &by_path, input.budget_tokens);
+        fuse_dense(
+            &mut candidates,
+            &dense_hits,
+            &by_path,
+            input.budget_tokens,
+            input.why,
+        );
     }
     let available_count = candidates.len();
     // Optional precise re-ranking: an LLM scores the head of the ranking for how
@@ -546,9 +597,130 @@ pub fn execute_analyzed(
         &input.limits,
         model,
         fallback_models,
+        input.review,
     )?;
     let bytes = documents.iter().map(|document| document.bytes).sum();
     Ok((result, bytes, fallback))
+}
+
+/// Files whose distinctive identifiers pseudo-relevance feedback mines from.
+const PRF_TOP_DOCS: usize = 3;
+/// Mined identifiers folded back into the search — kept small so the second
+/// pass stays anchored to the caller's intent rather than the leader files'
+/// whole vocabulary.
+const PRF_TERMS: usize = 5;
+
+/// Pseudo-relevance feedback terms: run a first lexical pass, take the leader
+/// files, and return the distinctive compound identifiers concentrated there
+/// that the caller did not already search. These name the origin symbol a
+/// natural-language question omits (`matchingColumns` for "why is the wrong
+/// column filtered"), which the second pass then recovers. Provider-free.
+fn prf_terms(
+    search: &dyn CodeSearch,
+    loader: &dyn DocumentLoader,
+    input: &RetrieveInput,
+    question: &str,
+    globs: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let hits = search.search(&input.cwd, question, input.max_hits, globs)?;
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut best: BTreeMap<String, usize> = BTreeMap::new();
+    for hit in &hits {
+        let entry = best.entry(hit.path.clone()).or_default();
+        *entry = (*entry).max(hit.score);
+    }
+    let mut ranked = best.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    ranked.truncate(PRF_TOP_DOCS);
+    let paths = ranked
+        .iter()
+        .map(|(path, _)| PathBuf::from(path))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let loaded = loader.load(&input.cwd, &paths, &input.limits)?;
+    // Never re-mine what the caller already searched.
+    let existing = search
+        .terms(question)
+        .into_iter()
+        .map(|term| term.to_lowercase())
+        .collect::<HashSet<_>>();
+    // For each identifier: how many leader files hold it, and its total count.
+    // A symbol present in *every* leader is a language idiom (`into_iter`,
+    // `is_empty`), not a domain term — those flood a first pass with generic
+    // hits, the measured failure of naive relevance feedback. The distinctive
+    // origin symbol instead concentrates in one or two of the leaders.
+    let doc_total = loaded.documents.len();
+    let mut doc_count: HashMap<String, usize> = HashMap::new();
+    let mut total_freq: HashMap<String, usize> = HashMap::new();
+    for document in &loaded.documents {
+        let mut seen_in_doc = HashSet::new();
+        for token in identifier_tokens(&document.numbered_content) {
+            *total_freq.entry(token.clone()).or_default() += 1;
+            if seen_in_doc.insert(token.clone()) {
+                *doc_count.entry(token).or_default() += 1;
+            }
+        }
+    }
+    let mut scored = total_freq
+        .into_iter()
+        .filter(|(token, _)| !existing.contains(&token.to_lowercase()))
+        // Drop the ubiquitous idiom (present in every leader) once there is more
+        // than one leader to compare against.
+        .filter(|(token, _)| doc_total < 2 || doc_count[token] < doc_total)
+        .collect::<Vec<_>>();
+    // Rank by how central each symbol is to the leaders: total uses first (a
+    // symbol the answer code leans on recurs, a one-off name like a test
+    // function appears once), then fewer holding files (more discriminating),
+    // then longer identifiers, then name for a deterministic set.
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| doc_count[&left.0].cmp(&doc_count[&right.0]))
+            .then_with(|| right.0.len().cmp(&left.0.len()))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    Ok(scored
+        .into_iter()
+        .take(PRF_TERMS)
+        .map(|(token, _)| token)
+        .collect())
+}
+
+/// Compound-identifier tokens in `text`: maximal runs of identifier characters,
+/// at least four long, that carry an underscore or a camelCase hump. That shape
+/// keeps the domain symbols (`filterMethod`, `applyExtraConfig`) while dropping
+/// the bare keywords and prose words a raw token count would otherwise surface.
+fn identifier_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|token| token.len() >= 4 && is_compound_identifier(token))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_compound_identifier(token: &str) -> bool {
+    if token.contains('_') {
+        return true;
+    }
+    // A camelCase hump: a lowercase letter or digit immediately followed by an
+    // uppercase letter, as in `matchingColumns`.
+    token
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| (pair[0].is_lowercase() || pair[0].is_ascii_digit()) && pair[1].is_uppercase())
+}
+
+/// The query terms a coverage mask names: bit `i` corresponds to `terms[i]`.
+fn decode_terms(mask: u16, terms: &[String]) -> Vec<String> {
+    (0..terms.len())
+        .filter(|index| mask & (1 << index) != 0)
+        .map(|index| terms[index].clone())
+        .collect()
 }
 
 fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> Vec<Document> {
@@ -594,6 +766,7 @@ fn fuse_dense(
     hits: &[DenseHit],
     by_path: &BTreeMap<String, &Document>,
     budget: usize,
+    why: bool,
 ) {
     let lexical_rank = (0..candidates.len()).collect::<Vec<_>>();
     let mut dense_rank = Vec::new();
@@ -628,6 +801,10 @@ fn fuse_dense(
             score: 0,
             estimated_tokens,
             content,
+            // Recalled by meaning, not by any shared query term: mark it so a
+            // caller sees the chunk earned its place from the semantic index.
+            source: why.then(|| "dense".to_owned()),
+            matched_terms: why.then(Vec::new),
         });
         dense_rank.push(candidates.len() - 1);
     }
@@ -866,9 +1043,39 @@ mod tests {
     };
 
     use super::{
-        ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput,
-        estimate_tokens, execute, fuse_dense, reciprocal_rank_fusion,
+        ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, decode_terms,
+        estimate_tokens, execute, fuse_dense, identifier_tokens, is_compound_identifier,
+        reciprocal_rank_fusion,
     };
+
+    #[test]
+    fn identifier_tokens_keeps_compound_symbols_and_drops_plain_words() {
+        let tokens = identifier_tokens("let matchingColumns = filter_method(return, value);");
+        assert!(tokens.contains(&"matchingColumns".to_owned()));
+        assert!(tokens.contains(&"filter_method".to_owned()));
+        // Bare keywords and short lowercase words carry no hump or underscore.
+        assert!(!tokens.contains(&"return".to_owned()));
+        assert!(!tokens.contains(&"value".to_owned()));
+        assert!(!tokens.contains(&"let".to_owned()));
+    }
+
+    #[test]
+    fn compound_identifier_needs_a_hump_or_underscore() {
+        assert!(is_compound_identifier("matchingColumns"));
+        assert!(is_compound_identifier("query_terms"));
+        assert!(is_compound_identifier("v2Router"));
+        // A lowercase run or an all-caps run is not a compound identifier.
+        assert!(!is_compound_identifier("function"));
+        assert!(!is_compound_identifier("HTML"));
+    }
+
+    #[test]
+    fn decode_terms_maps_mask_bits_to_terms() {
+        let terms = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+        // bits 0 and 2 set -> alpha and gamma, in term order.
+        assert_eq!(decode_terms(0b101, &terms), vec!["alpha", "gamma"]);
+        assert_eq!(decode_terms(0, &terms), Vec::<String>::new());
+    }
 
     #[test]
     fn reciprocal_rank_fusion_rewards_agreement_across_lists() {
@@ -897,6 +1104,8 @@ mod tests {
             score,
             estimated_tokens: 10,
             content: format!("{path} body"),
+            source: None,
+            matched_terms: None,
         };
         let mut candidates = vec![chunk("a", 100), chunk("b", 90), chunk("c", 80)];
         let rerank = MockRerank(vec![0.1, 0.2, 0.9]);
@@ -1075,6 +1284,8 @@ mod tests {
             score,
             estimated_tokens: 10,
             content: format!("{path} body"),
+            source: None,
+            matched_terms: None,
         };
         let mut candidates = vec![chunk("a.rs", 100), chunk("b.rs", 90)];
         let doc = Document {
@@ -1095,7 +1306,7 @@ mod tests {
             },
             similarity: 0.9,
         }];
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000);
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
         assert!(
             candidates.iter().any(|candidate| candidate.path == "c.rs"),
             "dense-only chunk was not injected"
@@ -1212,6 +1423,9 @@ mod tests {
             mmr_lambda: MMR_LAMBDA,
             max_block_lines: MAX_BLOCK_LINES,
             min_score_percent: MIN_SCORE_PERCENT,
+            why: false,
+            prf: false,
+            review: false,
         }
     }
 

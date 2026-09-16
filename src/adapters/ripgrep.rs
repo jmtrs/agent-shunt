@@ -130,9 +130,13 @@ const PROSE_STEMS: &[&str] = &[
 ];
 
 const STOP_WORDS: &[&str] = &[
-    "the", "and", "for", "with", "where", "what", "which", "from", "this", "that", "los", "las",
-    "una", "uno", "del", "con", "donde", "dónde", "como", "cómo", "que", "qué", "por", "para",
-    "está", "esta", "son", "hay",
+    "the", "and", "for", "with", "where", "what", "which", "from", "this", "that",
+    // Interrogatives and auxiliaries carry no locating signal but survive the
+    // length filter, so a natural-language question ("how does X work") would
+    // otherwise spend term slots and rank noise on them.
+    "how", "does", "are", "was", "were", "has", "have", "had", "why", "who", "will", "can",
+    "should", "would", "into", "about", "los", "las", "una", "uno", "del", "con", "donde", "dónde",
+    "como", "cómo", "que", "qué", "por", "para", "está", "esta", "son", "hay",
 ];
 
 impl CodeSearch for RipgrepSearch {

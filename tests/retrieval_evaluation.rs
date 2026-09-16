@@ -67,6 +67,9 @@ fn representative_repository_queries_recover_expected_evidence() {
                 mmr_lambda: MMR_LAMBDA,
                 max_block_lines: MAX_BLOCK_LINES,
                 min_score_percent: MIN_SCORE_PERCENT,
+                why: false,
+                prf: false,
+                review: false,
             },
         )
         .unwrap_or_else(|error| panic!("evaluation query failed: {question}: {error}"));

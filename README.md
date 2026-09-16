@@ -97,6 +97,19 @@ agent-shunt retrieve --semantic --question "Where is auth enforced?" --dir .
 # --semantic for broad recall then precise reranking.
 agent-shunt retrieve --semantic --rerank --question "Where is auth enforced?" --dir .
 
+# Opt-in pseudo-relevance feedback: mine distinctive identifiers from the
+# top-ranked files and fold them back into the search, so the origin symbol
+# the question never named still surfaces. Fully local — no provider.
+agent-shunt retrieve --prf --question "Why is the wrong column filtered?" --dir .
+
+# Show why each chunk was chosen (lexical term match vs dense recall, and the
+# matched terms), so a surprising result is legible instead of opaque.
+agent-shunt retrieve --why --question "Where is auth enforced?" --dir .
+
+# Opt-in review: critique the diff for risks, broken invariants, and missing
+# edge cases (severity per finding) instead of just answering. Implies --analyze.
+agent-shunt retrieve --review --diff --question "Any risks in these changes?" --dir .
+
 # Analyze files you picked yourself
 agent-shunt scan --question "Summarize this module" --path src/main.rs
 
@@ -106,15 +119,21 @@ agent-shunt doctor    # full local health report
 agent-shunt metrics   # aggregate usage and cost
 ```
 
-`retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`, `--expand`, `--semantic`, `--rerank`. Retrieval tuning: `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` (also `mmrLambda`/`maxBlockLines`/`minScorePercent` config keys; CLI wins).
+`retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`, `--expand`, `--prf`, `--semantic`, `--rerank`, `--why`, `--review`. Retrieval tuning: `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` (also `mmrLambda`/`maxBlockLines`/`minScorePercent` config keys; CLI wins).
 
-Three opt-in ways to search by meaning, not just by term — pick by what your provider offers:
+Four opt-in ways to widen recall beyond the exact term — pick by what your provider offers (`--prf` needs nothing):
 
-- **`--expand`** — a chat model suggests related terms (synonyms, likely identifiers) that widen the lexical search. Cheapest, needs only a chat model (works with OpenRouter). Set `expandByDefault: true` in config to make it *your* default (the shipped default stays local).
+- **`--prf`** — pseudo-relevance feedback: a first lexical pass finds the leader files, then their distinctive compound identifiers (a camelCase hump or an underscore, common in a couple of the leaders but not all) are folded into the search. Recovers the origin symbol a natural-language question omits — e.g. the field or helper that turns out to be the real cause — without you naming it. Fully local: one extra ripgrep pass and a bounded read, no provider.
+- **`--expand`** — a chat model suggests related terms (synonyms, likely identifiers) that widen the lexical search. Cheapest network option, needs only a chat model (works with OpenRouter). Set `expandByDefault: true` in config to make it *your* default (the shipped default stays local).
 - **`--semantic`** — a persistent, disk-cached embedding index over the whole repository recalls code the term search missed, fused with the lexical ranking (RRF). Higher quality. Embeds either through a provider that serves `/embeddings` (`embeddingProvider: "http"`, the default) **or fully on-device with no key or network** (`embeddingProvider: "local"`, a keyless ONNX model — build with `--features local-embed`). Vectors cache under `~/.cache/agent-shunt/index`, keyed by file content and model, so only changed files are re-embedded.
 - **`--rerank`** — the worker model scores the top candidates for how directly they answer the question and reorders them. Precision stage; combine with `--expand`/`--semantic` for the standard recall-then-rerank design.
 
-All three send content to a provider; the default `retrieve` stays fully local (no network, no key).
+`--expand`, `--semantic`, and `--rerank` send content to a provider; `--prf` and the default `retrieve` stay fully local (no network, no key).
+
+Two more flags make results legible and turn retrieval into review:
+
+- **`--why`** — annotates each chunk with its `source` (`lexical` for a term match, `dense` for a chunk the semantic index recalled by meaning) and the query terms it matched. A chunk that shares none of your words came from dense recall, not your query — the annotation says so, so a surprising rank is explained rather than eroding trust.
+- **`--review`** (implies `--analyze`) — swaps the analyst prompt ("answer the question") for a reviewer prompt: surface concrete risks, broken invariants, unhandled edge cases, and unsafe assumptions, each with a `severity` (`high`/`medium`/`low`) and a fix. Pair with `--diff` to review exactly what you changed.
 
 **Reviewing new or changed code?** Use `--diff` to scope retrieval to exactly what you touched — tracked modifications **and untracked new files** — against a base ref (bare `--diff` uses HEAD):
 

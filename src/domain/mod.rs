@@ -229,6 +229,17 @@ pub struct RetrievedChunk {
     pub score: usize,
     pub estimated_tokens: usize,
     pub content: String,
+    /// Why this chunk was retrieved, populated only under `--why`: `"lexical"`
+    /// for a ripgrep term match, `"dense"` for a chunk the semantic index
+    /// recalled by meaning that the lexical search never touched. Makes a
+    /// surprising result legible — a chunk that shares no query term came from
+    /// dense recall, not the caller's words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The query terms this chunk's file matched, populated only under `--why`,
+    /// so the caller can see which words earned the rank rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_terms: Option<Vec<String>>,
 }
 
 /// One chunk recalled by the persistent dense index: a block that the question
@@ -275,6 +286,11 @@ pub struct Finding {
     pub start_line: usize,
     pub end_line: usize,
     pub summary: String,
+    /// Risk level of a `--review` finding (`high`/`medium`/`low`), set by the
+    /// reviewer worker. Absent for the plain analyze path, which answers rather
+    /// than critiques, so serialization omits it there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
     /// Copy-paste command that prints this finding's exact source lines, so
     /// the host can verify the answer against the real file. Populated during
     /// validation; never trusted from the worker.
@@ -341,6 +357,10 @@ pub struct WorkerRequest {
     pub question: String,
     pub documents: Vec<Document>,
     pub limits: Limits,
+    /// Selects the reviewer system prompt (find risks, broken invariants,
+    /// missing edge cases) instead of the default analyst prompt (answer the
+    /// question). Set by the `--review` retrieval path.
+    pub review: bool,
 }
 
 #[derive(Debug, Clone)]
