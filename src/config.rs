@@ -43,6 +43,10 @@ pub struct Config {
     pub embedding_model: Option<String>,
     pub embedding_base_url: Option<String>,
     pub embedding_api_key_env: Option<String>,
+    /// Which embedding backend `--semantic` uses: `"http"` (default) calls an
+    /// OpenAI-compatible `/embeddings` endpoint; `"local"` runs a keyless
+    /// on-device model (requires the `local-embed` build feature).
+    pub embedding_provider: Option<String>,
     /// When true, a bare `retrieve` applies LLM query expansion (the `--expand`
     /// path) by default. Off by default so the shipped default stays local.
     pub expand_by_default: bool,
@@ -71,6 +75,7 @@ impl std::fmt::Debug for Config {
             .field("embedding_model", &self.embedding_model)
             .field("embedding_base_url", &self.embedding_base_url)
             .field("embedding_api_key_env", &self.embedding_api_key_env)
+            .field("embedding_provider", &self.embedding_provider)
             .field("expand_by_default", &self.expand_by_default)
             .finish()
     }
@@ -103,6 +108,7 @@ struct StoredConfig {
     embedding_model: Option<String>,
     embedding_base_url: Option<String>,
     embedding_api_key_env: Option<String>,
+    embedding_provider: Option<String>,
     expand_by_default: Option<bool>,
 }
 
@@ -242,6 +248,16 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
     if stored.max_block_lines == Some(0) {
         bail!("maxBlockLines must be a positive integer");
     }
+    let embedding_provider = stored
+        .embedding_provider
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    if let Some(provider) = &embedding_provider
+        && provider != "http"
+        && provider != "local"
+    {
+        bail!("embeddingProvider must be \"http\" or \"local\"");
+    }
     Ok(Config {
         model,
         fallback_models,
@@ -271,6 +287,7 @@ pub fn load(model_override: Option<&str>) -> Result<Config> {
             .embedding_api_key_env
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
+        embedding_provider,
         expand_by_default: stored.expand_by_default.unwrap_or(false),
     })
 }

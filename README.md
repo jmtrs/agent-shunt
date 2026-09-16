@@ -111,7 +111,7 @@ agent-shunt metrics   # aggregate usage and cost
 Three opt-in ways to search by meaning, not just by term — pick by what your provider offers:
 
 - **`--expand`** — a chat model suggests related terms (synonyms, likely identifiers) that widen the lexical search. Cheapest, needs only a chat model (works with OpenRouter). Set `expandByDefault: true` in config to make it *your* default (the shipped default stays local).
-- **`--semantic`** — a persistent, disk-cached embedding index over the whole repository recalls code the term search missed, fused with the lexical ranking (RRF). Higher quality; needs a provider that serves `/embeddings`. Vectors cache under `~/.cache/agent-shunt/index`, keyed by file content and model, so only changed files are re-embedded.
+- **`--semantic`** — a persistent, disk-cached embedding index over the whole repository recalls code the term search missed, fused with the lexical ranking (RRF). Higher quality. Embeds either through a provider that serves `/embeddings` (`embeddingProvider: "http"`, the default) **or fully on-device with no key or network** (`embeddingProvider: "local"`, a keyless ONNX model — build with `--features local-embed`). Vectors cache under `~/.cache/agent-shunt/index`, keyed by file content and model, so only changed files are re-embedded.
 - **`--rerank`** — the worker model scores the top candidates for how directly they answer the question and reorders them. Precision stage; combine with `--expand`/`--semantic` for the standard recall-then-rerank design.
 
 All three send content to a provider; the default `retrieve` stays fully local (no network, no key).
@@ -154,6 +154,7 @@ Optional `~/.config/agent-shunt/config.json`:
   "embeddingModel": "text-embedding-3-small",
   "embeddingBaseUrl": "https://api.openai.com/v1",
   "embeddingApiKeyEnv": "OPENAI_API_KEY",
+  "embeddingProvider": "http",
   "codexHomes": ["~/.codex"],
   "claudeHomes": ["~/.claude"]
 }
@@ -166,6 +167,7 @@ Optional `~/.config/agent-shunt/config.json`:
 - `disableReasoning` — set `true` for reasoning models so they answer directly (this tool does grounded extraction, not deliberation). Auto-injects the provider's disable-thinking parameter: z.ai `thinking:{type:disabled}`, Qwen/DashScope `enable_thinking:false`, otherwise OpenRouter-style `reasoning:{enabled:false}`.
 - `extraBody` — a JSON object merged into every request body, applied last so it overrides any tool default (including the reasoning field above). The escape hatch for any provider parameter the built-ins don't cover.
 - `embeddingModel` — enables `--semantic`. Point `embeddingBaseUrl` at a provider that serves `/embeddings` (OpenAI, or a local Ollama/LM Studio) — **OpenRouter does not**, so `embeddingBaseUrl` usually differs from `baseUrl` even though it defaults to it. The key resolves like the worker's, or via `embeddingApiKeyEnv`. A local endpoint (Ollama `nomic-embed-text`) keeps `--semantic` keyless and on-machine.
+- `embeddingProvider` — `"http"` (default) uses the `/embeddings` client above; `"local"` runs a keyless, on-device model with no network at query time (`embeddingModel` defaults to `bge-small-en-v1.5`; also `bge-base-en-v1.5`, `bge-large-en-v1.5`, `all-minilm-l6-v2`, `nomic-embed-text-v1.5`). The local backend is compiled in only with `--features local-embed`, which pulls the ONNX Runtime and downloads the model weights once to a cache on first use; the default build stays lean and selecting `"local"` without the feature fails with a build hint.
 - `expandByDefault` — set `true` to apply `--expand` (LLM query expansion) on every `retrieve`. Off by default so the shipped default stays local; the CLI `--expand` flag enables it per-invocation regardless.
 - Retrieval tuning `mmrLambda` / `maxBlockLines` / `minScorePercent` override the built-in defaults; the matching CLI flags win over config.
 - Numeric knobs (`timeoutMs`, `maxOutputTokens`, size/file caps) are also accepted; defaults are sane.

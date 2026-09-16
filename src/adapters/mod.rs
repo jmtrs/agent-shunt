@@ -6,6 +6,8 @@ pub mod filesystem;
 pub mod gemini_install;
 pub mod git;
 pub mod host_install;
+#[cfg(feature = "local-embed")]
+pub mod local_embedding;
 pub mod metrics;
 pub mod openai_compatible;
 pub mod opencode_install;

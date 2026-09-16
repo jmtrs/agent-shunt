@@ -4,3 +4,4 @@ target/
 coverage/
 *.log
 .DS_Store
+.fastembed_cache/

@@ -1,6 +1,6 @@
 [package]
 name = "agent-shunt"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "Provider-neutral, read-only context worker for coding agents"
 license = "MIT"
@@ -31,6 +31,10 @@ ast = [
     "dep:tree-sitter-bash",
     "dep:tree-sitter-json",
 ]
+# Local, keyless embeddings for `--semantic` via fastembed (ONNX Runtime). Off
+# by default: pulls onnxruntime + tokenizers and downloads model weights on
+# first use. Enable to run `--semantic` with no `/embeddings` provider.
+local-embed = ["dep:fastembed"]
 
 [dependencies]
 anyhow = "1"
@@ -56,6 +60,7 @@ tree-sitter-cpp = { version = "0.23", optional = true }
 tree-sitter-ruby = { version = "0.23", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
 tree-sitter-json = { version = "0.24", optional = true }
+fastembed = { version = "4", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
