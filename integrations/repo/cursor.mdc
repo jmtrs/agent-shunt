@@ -22,6 +22,8 @@ agent-shunt retrieve --analyze --question "<current task>" --dir "<repository ro
 
 Use `scan --path ...` only for explicitly chosen files. Do not pass secrets, generated artifacts, databases, binaries, or unrelated files.
 
+Reviewing a change or freshly written code? Add `--diff` to scope retrieval to what you touched — tracked modifications and untracked new files — which plain retrieval can otherwise bury under older files.
+
 Use normal search and ranged reads when the exact file, symbol, or line range is already known. Never replace a small targeted read with the shunt.
 
 If retrieval finds no useful evidence, every worker model fails, or the CLI is unavailable, continue with normal targeted repository reads. Do not block the task and do not claim that model output is verified beyond its locally validated file and line references.

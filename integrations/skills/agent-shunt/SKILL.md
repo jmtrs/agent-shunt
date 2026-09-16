@@ -31,14 +31,18 @@ agent-shunt retrieve --analyze --question "<task>" --dir "<repo>"             # 
 
 Only skip the tool for a single file whose exact path and line range you already know — then a ranged read is cheaper.
 
-## Scope retrieval to changed files
+Re-run a broad `retrieve` whenever the investigation crosses into new modules — a fresh sync/realtime/data-model concern, a newly named type — not just once at the start. A new question deserves a new retrieval, even mid-task.
 
-For diff/PR review, restrict retrieval to locally changed files (tracked modifications + untracked). Bare `--diff` uses HEAD; pass a base ref to compare against it:
+## Reviewing new or changed code — use `--diff`
+
+When the task is reviewing a change, PR, or freshly written code, scope with `--diff`: it restricts retrieval to exactly what you touched — tracked modifications **and untracked new files** — which plain `retrieve` can otherwise bury under older files that share the same vocabulary. Bare `--diff` uses HEAD; pass a base ref to compare against it:
 
 ```bash
-agent-shunt retrieve --diff --question "<what changed>" --dir "<repo>"
-agent-shunt retrieve --diff origin/develop --question "<what changed>" --dir "<repo>"
+agent-shunt retrieve --diff --question "<what changed / what could break>" --dir "<repo>"
+agent-shunt retrieve --diff origin/develop --question "<review these changes>" --dir "<repo>"
 ```
+
+Even without `--diff`, unscoped `retrieve` gives matching untracked/modified files a ranking nudge, so new code is not lost — but for a review, `--diff` is the right tool.
 
 ## Keep unsafe or noisy paths out
 

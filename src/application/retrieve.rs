@@ -50,6 +50,12 @@ const MAX_DIFF_TERM_TEXT: usize = 100_000;
 /// other hits from the same files by this factor.
 const SCOPE_HUNK_BOOST: usize = 3;
 
+/// Unscoped retrieval multiplies the score of hits in git-untracked or modified
+/// files by this factor, so newly written code is not buried under older files
+/// that share its vocabulary. Below [`SCOPE_HUNK_BOOST`]: a nudge for relevance,
+/// not the hard subject-of-review focus that `--diff` applies.
+const CHANGED_FILE_BOOST: usize = 2;
+
 /// Largest enclosing block a hit may expand into. Beyond this the block is a
 /// whole impl/class/file, not a focused unit, so the hit keeps its fixed
 /// context window instead. Sized to a generous function body: big enough to
@@ -226,6 +232,24 @@ pub fn execute_with_resolver(
                 && hit_in_changed_lines(hit, change)
             {
                 hit.score = hit.score.saturating_mul(SCOPE_HUNK_BOOST);
+            }
+        }
+    } else {
+        // Unscoped: surface locally new or modified code. A matching file that
+        // is git-untracked or changed is likely the subject of the current work,
+        // yet its lower term frequency can bury it under older files with the
+        // same vocabulary. Boost hits on changed paths so new code is not lost.
+        // Best-effort: only files that already matched are lifted, and outside a
+        // git work tree (or on error) nothing changes.
+        if let Ok(changes) = change_source.changes(&input.cwd, "HEAD") {
+            let changed = changes
+                .iter()
+                .map(|change| change.path.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            for hit in &mut hits {
+                if changed.contains(hit.path.as_str()) {
+                    hit.score = hit.score.saturating_mul(CHANGED_FILE_BOOST);
+                }
             }
         }
     }
@@ -932,6 +956,87 @@ mod tests {
         assert!(
             recorded.contains("needle"),
             "original term dropped: {recorded}"
+        );
+    }
+
+    #[test]
+    fn unscoped_retrieval_boosts_hits_in_changed_files() {
+        struct TwoHitSearch;
+        impl CodeSearch for TwoHitSearch {
+            fn terms(&self, _: &str) -> Vec<String> {
+                vec!["needle".to_owned()]
+            }
+            fn search(&self, _: &Path, _: &str, _: usize, _: &[String]) -> Result<Vec<SearchHit>> {
+                Ok(vec![
+                    SearchHit {
+                        path: "old.rs".to_owned(),
+                        line: 1,
+                        score: 10,
+                        matched_terms: 1,
+                    },
+                    SearchHit {
+                        path: "new.rs".to_owned(),
+                        line: 1,
+                        score: 6,
+                        matched_terms: 1,
+                    },
+                ])
+            }
+            fn available(&self) -> bool {
+                true
+            }
+        }
+        struct TwoDocs;
+        impl DocumentLoader for TwoDocs {
+            fn load(&self, _: &Path, _: &[PathBuf], _: &Limits) -> Result<LoadedDocuments> {
+                let doc = |path: &str| Document {
+                    path: path.to_owned(),
+                    bytes: 8,
+                    line_count: 1,
+                    lines: vec!["needle".to_owned()],
+                    numbered_content: String::new(),
+                    allowed_ranges: Vec::new(),
+                };
+                Ok(LoadedDocuments {
+                    total_bytes: 16,
+                    documents: vec![doc("old.rs"), doc("new.rs")],
+                })
+            }
+        }
+        // new.rs is untracked; its raw score (6) is below old.rs (10), but the
+        // changed-file boost (x2 -> 12) lifts it above.
+        let changed = Changes(vec![FileChange {
+            path: "new.rs".to_owned(),
+            hunks: Vec::new(),
+            whole_file: true,
+            changed_lines: "needle".to_owned(),
+        }]);
+        let resolver = crate::application::resolver::HeuristicResolver;
+        let input = RetrieveInput {
+            budget_tokens: 1000,
+            context_lines: 0,
+            ..input()
+        };
+        let (result, _) = super::execute_with_resolver(
+            &TwoHitSearch,
+            &changed,
+            &TwoDocs,
+            &resolver,
+            None,
+            None,
+            None,
+            &input,
+        )
+        .unwrap();
+        let order = result
+            .chunks
+            .iter()
+            .map(|chunk| chunk.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order.first(),
+            Some(&"new.rs"),
+            "changed file not boosted above older match: {order:?}"
         );
     }
 
