@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use crate::{
     application::ports::{
         ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseIndex, DocumentLoader,
-        Reranker, StructureResolver,
+        QueryExpander, Reranker, StructureResolver,
     },
     domain::{
         DenseHit, Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk,
@@ -130,6 +130,7 @@ pub fn execute(
         &super::resolver::HeuristicResolver,
         None,
         None,
+        None,
         input,
     )
 }
@@ -146,6 +147,7 @@ pub fn execute_with_resolver(
     resolver: &dyn StructureResolver,
     index: Option<&dyn DenseIndex>,
     rerank: Option<&dyn Reranker>,
+    expander: Option<&dyn QueryExpander>,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
     super::scan::validate_question(&input.question, &input.limits)?;
@@ -198,6 +200,20 @@ pub fn execute_with_resolver(
         // EXCLUDED_GLOBS still apply, so secrets stay out).
         globs.extend(changes.iter().map(|change| change.path.clone()));
     }
+    // Optional query expansion: a chat model adds related terms (synonyms,
+    // likely identifiers) so the lexical search recovers code phrased in other
+    // words. Appended after the question's own terms, which keep priority in the
+    // bounded term set. Only the opt-in `--expand` path supplies an expander.
+    let search_question = if let Some(expander) = expander {
+        let extra = expander.expand(&input.question)?;
+        if extra.is_empty() {
+            search_question
+        } else {
+            format!("{search_question} {}", extra.join(" "))
+        }
+    } else {
+        search_question
+    };
     let terms = search.terms(&search_question);
     if terms.is_empty() {
         bail!("question contains no searchable terms");
@@ -471,6 +487,7 @@ pub fn execute_analyzed(
     resolver: &dyn StructureResolver,
     index: Option<&dyn DenseIndex>,
     rerank: Option<&dyn Reranker>,
+    expander: Option<&dyn QueryExpander>,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
     input: &RetrieveInput,
@@ -484,6 +501,7 @@ pub fn execute_analyzed(
         resolver,
         index,
         rerank,
+        expander,
         input,
     )?;
     if documents.is_empty() {
@@ -841,6 +859,80 @@ mod tests {
             .map(|candidate| candidate.path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(order, vec!["c", "b", "a"]);
+    }
+
+    struct MockExpander(Vec<String>);
+    impl crate::application::ports::QueryExpander for MockExpander {
+        fn expand(&self, _question: &str) -> Result<Vec<String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn expansion_appends_terms_to_the_lexical_search() {
+        struct RecordingSearch(Mutex<String>);
+        impl CodeSearch for RecordingSearch {
+            fn terms(&self, question: &str) -> Vec<String> {
+                vec![question.to_owned()]
+            }
+            fn search(
+                &self,
+                _root: &Path,
+                question: &str,
+                _max: usize,
+                _globs: &[String],
+            ) -> Result<Vec<SearchHit>> {
+                *self.0.lock().unwrap() = question.to_owned();
+                Ok(vec![SearchHit {
+                    path: "a.rs".to_owned(),
+                    line: 1,
+                    score: 5,
+                    matched_terms: 1,
+                }])
+            }
+            fn available(&self) -> bool {
+                true
+            }
+        }
+        struct OneDoc;
+        impl DocumentLoader for OneDoc {
+            fn load(&self, _r: &Path, _p: &[PathBuf], _l: &Limits) -> Result<LoadedDocuments> {
+                Ok(LoadedDocuments {
+                    total_bytes: 20,
+                    documents: vec![Document {
+                        path: "a.rs".to_owned(),
+                        bytes: 20,
+                        line_count: 1,
+                        lines: vec!["fn a() { work(); }".to_owned()],
+                        numbered_content: String::new(),
+                        allowed_ranges: Vec::new(),
+                    }],
+                })
+            }
+        }
+        let search = RecordingSearch(Mutex::new(String::new()));
+        let expander = MockExpander(vec!["synonymterm".to_owned()]);
+        let resolver = crate::application::resolver::HeuristicResolver;
+        super::execute_with_resolver(
+            &search,
+            &Changes(Vec::new()),
+            &OneDoc,
+            &resolver,
+            None,
+            None,
+            Some(&expander),
+            &input(),
+        )
+        .unwrap();
+        let recorded = search.0.lock().unwrap().clone();
+        assert!(
+            recorded.contains("synonymterm"),
+            "expanded term missing from search: {recorded}"
+        );
+        assert!(
+            recorded.contains("needle"),
+            "original term dropped: {recorded}"
+        );
     }
 
     #[test]

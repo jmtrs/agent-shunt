@@ -61,6 +61,15 @@ pub trait Embedder {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
+/// Expands a question into extra lexical search terms — synonyms, likely
+/// identifiers, related concepts — so the ripgrep search recovers code that
+/// answers the question in different words (`login`/`session` for "auth"). A
+/// chat model does the expanding, so this needs no embeddings endpoint and
+/// works with any provider. Optional: only the opt-in `--expand` path builds one.
+pub trait QueryExpander {
+    fn expand(&self, question: &str) -> Result<Vec<String>>;
+}
+
 /// Recalls the chunks of a whole repository whose meaning matches the question,
 /// from a persistent embedding index. This surfaces relevant code the lexical
 /// search never hit (few shared terms), which retrieval then fuses with the

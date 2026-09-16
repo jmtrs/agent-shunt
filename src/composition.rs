@@ -13,13 +13,18 @@ use crate::{
         gemini_install::GeminiInstaller,
         git::GitChangeSource,
         metrics::JsonlMetrics,
-        openai_compatible::{EmbeddingClient, LlmReranker, OpenAiCompatibleWorker},
+        openai_compatible::{
+            EmbeddingClient, LlmQueryExpander, LlmReranker, OpenAiCompatibleWorker,
+        },
         opencode_install::OpencodeInstaller,
         repo_install::RepoInstaller,
         ripgrep::RipgrepSearch,
     },
     application::{
-        ports::{CodeSearch, CredentialResolver, DenseIndex, HostInstaller, MetricsSink, Reranker},
+        ports::{
+            CodeSearch, CredentialResolver, DenseIndex, HostInstaller, MetricsSink, QueryExpander,
+            Reranker,
+        },
         retrieve::{self, RetrieveInput},
         scan::{self, ScanInput},
     },
@@ -202,15 +207,30 @@ impl Application {
         ))
     }
 
+    /// Builds the opt-in LLM query expander for `--expand`, reusing the worker's
+    /// model, base URL, and credentials.
+    fn expander_for(&self, config: &Config) -> Result<LlmQueryExpander> {
+        let api_key = self.credentials_for(config).resolve()?.api_key;
+        Ok(LlmQueryExpander::new(
+            &config.base_url,
+            &config.model,
+            &api_key,
+            config.limits.clone(),
+        ))
+    }
+
     pub fn retrieve(
         &self,
         input: RetrieveInput,
         analyze: bool,
         semantic: bool,
         rerank: bool,
+        expand: bool,
         config: &Config,
     ) -> Result<Value> {
         let started = Instant::now();
+        // `--expand` on the CLI, or `expandByDefault` in the user's own config.
+        let expand = expand || config.expand_by_default;
         // The embeddings client and the index that borrows it must outlive the
         // execute call, so both are bound here before use.
         let embeddings = if semantic {
@@ -235,6 +255,12 @@ impl Application {
             None
         };
         let reranker = reranker.as_ref().map(|ranker| ranker as &dyn Reranker);
+        let expander = if expand {
+            Some(self.expander_for(config)?)
+        } else {
+            None
+        };
+        let expander = expander.as_ref().map(|e| e as &dyn QueryExpander);
         let result = if analyze {
             let credentials = self.credentials_for(config);
             let worker = self.worker_for(config);
@@ -245,6 +271,7 @@ impl Application {
                 &self.resolver,
                 index,
                 reranker,
+                expander,
                 &credentials,
                 &worker,
                 &input,
@@ -273,6 +300,7 @@ impl Application {
                 &self.resolver,
                 index,
                 reranker,
+                expander,
                 &input,
             )
             .and_then(|(retrieval_result, documents)| {
@@ -297,6 +325,9 @@ impl Application {
         // and `--analyze` paths are counted and timed distinctly in the history,
         // rather than blurred into one "retrieve" bucket.
         let mut operation = String::from("retrieve");
+        if expand {
+            operation.push_str("+expand");
+        }
         if semantic {
             operation.push_str("+semantic");
         }

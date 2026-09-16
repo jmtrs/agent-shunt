@@ -207,6 +207,12 @@ struct RetrieveArgs {
     /// before the budget is packed. Sends those chunks to the model.
     #[arg(long)]
     rerank: bool,
+    /// Opt-in query expansion: a chat model adds related search terms
+    /// (synonyms, likely identifiers) so the lexical search recovers code
+    /// phrased differently — no embeddings endpoint needed. Enable by default
+    /// with `expandByDefault` in config.
+    #[arg(long)]
+    expand: bool,
 }
 
 fn main() {
@@ -262,7 +268,14 @@ fn run() -> Result<()> {
                     .or(config.min_score_percent)
                     .unwrap_or(MIN_SCORE_PERCENT),
             };
-            app.retrieve(input, args.analyze, args.semantic, args.rerank, &config)?
+            app.retrieve(
+                input,
+                args.analyze,
+                args.semantic,
+                args.rerank,
+                args.expand,
+                &config,
+            )?
         }
         Some(Command::Check(args)) => {
             let config = config::load(args.model.as_deref())?;

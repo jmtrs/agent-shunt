@@ -52,14 +52,15 @@ Do not pass secrets, generated artifacts, databases, binaries, or unrelated file
 
 `--budget-tokens` (default 12000), `--context-lines` (default 8), `--max-hits` (default 200), `--model <id>` override the retrieval envelope when chunks are truncated or the repo is large. `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` tune diversity, chunk size, and the relevance floor.
 
-Two further opt-in escalations cost money like `--analyze` (they send chunks to a provider) — use only when free lexical retrieval misses code that matches by meaning rather than by terms:
+Three opt-in escalations cost money like `--analyze` (they call a provider) — use only when free lexical retrieval misses code that matches by meaning rather than by exact terms:
 
 ```bash
+agent-shunt retrieve --expand   --question "..." --dir "<repo>"   # chat model adds related search terms (any provider)
 agent-shunt retrieve --semantic --question "..." --dir "<repo>"   # dense whole-repo recall (needs embeddingModel in config)
 agent-shunt retrieve --rerank   --question "..." --dir "<repo>"   # worker model reorders the top chunks
 ```
 
-Prefer plain `retrieve` first; reach for `--semantic`/`--rerank` only when it comes back thin.
+Prefer plain `retrieve` first; reach for `--expand` (cheapest, chat-only), then `--semantic`/`--rerank`, only when it comes back thin.
 
 ## Output contract — verify, do not trust
 
