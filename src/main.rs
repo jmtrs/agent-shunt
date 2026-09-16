@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use agent_shunt::{
@@ -213,6 +213,23 @@ struct RetrieveArgs {
     /// with `expandByDefault` in config.
     #[arg(long)]
     expand: bool,
+    /// Opt-in pseudo-relevance feedback: a first lexical pass finds the leader
+    /// files, then their distinctive identifiers are folded into the search so
+    /// the origin symbol the question never named still surfaces. Local, no
+    /// provider — costs one extra ripgrep pass and a bounded read.
+    #[arg(long)]
+    prf: bool,
+    /// Annotate each retrieved chunk with why it was selected: `source`
+    /// (`lexical` term match or `dense` semantic recall) and the matched query
+    /// terms, so a surprising result is legible rather than opaque. Cannot be
+    /// combined with `--analyze`/`--review`, which return an answer, not chunks.
+    #[arg(long)]
+    why: bool,
+    /// With `--analyze`, use the reviewer prompt — surface risks, broken
+    /// invariants, and missing edge cases with a severity per finding — instead
+    /// of the analyst prompt that answers the question. Implies `--analyze`.
+    #[arg(long)]
+    review: bool,
 }
 
 fn main() {
@@ -235,6 +252,13 @@ fn run() -> Result<()> {
             )?
         }
         Some(Command::Retrieve(args)) => {
+            // `--why` annotates the returned chunks; the analyze/review path
+            // returns a synthesized answer instead of chunks, so the annotation
+            // would be computed and silently discarded. Reject the combination
+            // rather than accept a flag that does nothing.
+            if args.why && (args.analyze || args.review) {
+                bail!("--why annotates retrieved chunks and has no effect with --analyze/--review");
+            }
             let config = config::load(args.model.as_deref())?;
             let mut globs = args.glob;
             globs.extend(
@@ -267,10 +291,15 @@ fn run() -> Result<()> {
                     .min_score_percent
                     .or(config.min_score_percent)
                     .unwrap_or(MIN_SCORE_PERCENT),
+                why: args.why,
+                prf: args.prf,
+                review: args.review,
             };
+            // `--review` critiques the retrieved code, which requires the
+            // analyze pass; enable it implicitly so `--review` works alone.
             app.retrieve(
                 input,
-                args.analyze,
+                args.analyze || args.review,
                 args.semantic,
                 args.rerank,
                 args.expand,

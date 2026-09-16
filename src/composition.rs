@@ -371,6 +371,9 @@ impl Application {
         if expand {
             operation.push_str("+expand");
         }
+        if input.prf {
+            operation.push_str("+prf");
+        }
         if semantic {
             operation.push_str("+semantic");
         }
@@ -378,7 +381,7 @@ impl Application {
             operation.push_str("+rerank");
         }
         if analyze {
-            operation.push_str("+analyze");
+            operation.push_str(if input.review { "+review" } else { "+analyze" });
         }
         self.record_result(
             &operation,
