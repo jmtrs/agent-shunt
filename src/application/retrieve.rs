@@ -4,10 +4,13 @@ use anyhow::{Result, bail};
 
 use crate::{
     application::ports::{
-        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseRanker, DocumentLoader,
+        ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseIndex, DocumentLoader,
         Reranker, StructureResolver,
     },
-    domain::{Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
+    domain::{
+        DenseHit, Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk,
+        ScanResult,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -106,11 +109,6 @@ const MIN_CLIFF_FILES: usize = 3;
 /// scales of BM25-style weights and cosine similarity.
 const RRF_K: f64 = 60.0;
 
-/// Most candidate chunks embedded in one semantic pass. Bounds the embedding
-/// cost and request size; the pool is the top of the lexical ranking, which is
-/// where a semantically relevant chunk realistically sits.
-const MAX_SEMANTIC_CANDIDATES: usize = 96;
-
 /// Most candidates sent to the LLM re-ranker. Reranking is the costly stage, so
 /// it is applied only to the head of the ranking (broad recall first, precise
 /// reranking of the top) — the standard two-stage design.
@@ -146,7 +144,7 @@ pub fn execute_with_resolver(
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
     resolver: &dyn StructureResolver,
-    dense: Option<&dyn DenseRanker>,
+    index: Option<&dyn DenseIndex>,
     rerank: Option<&dyn Reranker>,
     input: &RetrieveInput,
 ) -> Result<(RetrieveResult, Vec<Document>)> {
@@ -254,13 +252,34 @@ pub fn execute_with_resolver(
         .iter()
         .map(|(path, _)| PathBuf::from(path))
         .collect::<Vec<_>>();
-    let loaded = if paths.is_empty() {
+    let mut loaded = if paths.is_empty() {
         crate::domain::LoadedDocuments {
             documents: Vec::new(),
             total_bytes: 0,
         }
     } else {
         loader.load(&input.cwd, &paths, &input.limits)?
+    };
+
+    // Optional dense recall: the persistent index returns whole-repo chunks the
+    // question matches by meaning. Their files are merged into the loaded set
+    // (so the analyze path can deliver them), and the hits are fused with the
+    // lexical ranking below.
+    let dense_hits = if let Some(index) = index {
+        let recall = index.recall(&input.question, &input.cwd, &globs, &input.limits)?;
+        for document in recall.documents {
+            if !loaded
+                .documents
+                .iter()
+                .any(|held| held.path == document.path)
+            {
+                loaded.total_bytes += document.bytes;
+                loaded.documents.push(document);
+            }
+        }
+        recall.hits
+    } else {
+        Vec::new()
     };
 
     let by_path = loaded
@@ -337,14 +356,14 @@ pub fn execute_with_resolver(
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    let available_count = candidates.len();
-    // Optional semantic pass: fuse the lexical ranking with a dense
-    // (embedding) ranking so a chunk that answers the question by meaning —
-    // not by sharing its exact terms — can rise into the budget. Only the
-    // opt-in `--semantic` path supplies a ranker; the default stays local.
-    if let Some(dense) = dense {
-        rescore_semantic(dense, &input.question, &mut candidates)?;
+    // Optional semantic pass: fuse the lexical candidates with the dense index's
+    // recall so a chunk that answers the question by meaning — not by sharing its
+    // exact terms — can rise into the budget, including from files the lexical
+    // search never hit. Only the opt-in `--semantic` path supplies hits.
+    if !dense_hits.is_empty() {
+        fuse_dense(&mut candidates, &dense_hits, &by_path, input.budget_tokens);
     }
+    let available_count = candidates.len();
     // Optional precise re-ranking: an LLM scores the head of the ranking for how
     // directly each chunk answers the question, and the top is reordered by that
     // score before the budget is packed. Costly, so it runs only on the top-k
@@ -450,7 +469,7 @@ pub fn execute_analyzed(
     change_source: &dyn ChangeSource,
     loader: &dyn DocumentLoader,
     resolver: &dyn StructureResolver,
-    dense: Option<&dyn DenseRanker>,
+    index: Option<&dyn DenseIndex>,
     rerank: Option<&dyn Reranker>,
     credentials: &dyn CredentialResolver,
     worker: &dyn ContextWorker,
@@ -463,7 +482,7 @@ pub fn execute_analyzed(
         change_source,
         loader,
         resolver,
-        dense,
+        index,
         rerank,
         input,
     )?;
@@ -515,43 +534,55 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
         .collect()
 }
 
-/// Re-scores candidates by fusing their existing lexical ranking with a dense
-/// (embedding) ranking of the same chunks. The fused rank becomes each
-/// candidate's new score, so the downstream relevance floor, MMR ordering, and
-/// budget packing all operate on the hybrid ranking without further change.
-fn rescore_semantic(
-    dense: &dyn DenseRanker,
-    question: &str,
+/// Fuses the lexical candidate ranking with the dense index's recall via
+/// Reciprocal Rank Fusion. Each dense hit either boosts an overlapping lexical
+/// candidate or, when the lexical search never touched that region, joins the
+/// pool as a fresh candidate. The fused rank becomes each candidate's new score,
+/// so the downstream floor, MMR ordering, and budget packing all operate on the
+/// hybrid ranking without further change.
+fn fuse_dense(
     candidates: &mut Vec<RetrievedChunk>,
-) -> Result<()> {
-    if candidates.len() < 2 {
-        return Ok(());
+    hits: &[DenseHit],
+    by_path: &BTreeMap<String, &Document>,
+    budget: usize,
+) {
+    let lexical_rank = (0..candidates.len()).collect::<Vec<_>>();
+    let mut dense_rank = Vec::new();
+    // `hits` arrive sorted by descending similarity, so pushing in order yields
+    // the dense ranking directly.
+    for hit in hits {
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.path == hit.path && overlaps(candidate, hit))
+        {
+            if !dense_rank.contains(&index) {
+                dense_rank.push(index);
+            }
+            continue;
+        }
+        let Some(document) = by_path.get(&hit.path) else {
+            continue;
+        };
+        if hit.range.end_line > document.line_count {
+            continue;
+        }
+        let content = document.numbered_range(hit.range);
+        let estimated_tokens = delivered_tokens(&content, &hit.path);
+        // A chunk that cannot ever fit the budget is not worth ranking.
+        if estimated_tokens > budget {
+            continue;
+        }
+        candidates.push(RetrievedChunk {
+            path: hit.path.clone(),
+            start_line: hit.range.start_line,
+            end_line: hit.range.end_line,
+            score: 0,
+            estimated_tokens,
+            content,
+        });
+        dense_rank.push(candidates.len() - 1);
     }
-    // The pool is already sorted by lexical score; cap it so the embedding
-    // request stays bounded and keeps the strongest candidates.
-    candidates.truncate(MAX_SEMANTIC_CANDIDATES);
-    let texts = candidates
-        .iter()
-        .map(|candidate| candidate.content.clone())
-        .collect::<Vec<_>>();
-    let similarities = dense.similarities(question, &texts)?;
-    if similarities.len() != candidates.len() {
-        bail!(
-            "dense ranker returned {} scores for {} candidates",
-            similarities.len(),
-            candidates.len()
-        );
-    }
-    // Lexical ranking is the current order; the dense ranking sorts by cosine.
-    let lexical = (0..candidates.len()).collect::<Vec<_>>();
-    let mut dense_rank = (0..candidates.len()).collect::<Vec<_>>();
-    dense_rank.sort_by(|&left, &right| {
-        similarities[right]
-            .partial_cmp(&similarities[left])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left.cmp(&right))
-    });
-    let fused = reciprocal_rank_fusion(&[lexical, dense_rank], RRF_K);
+    let fused = reciprocal_rank_fusion(&[lexical_rank, dense_rank], RRF_K);
     let count = candidates.len();
     for (position, (index, _)) in fused.iter().enumerate() {
         // Fused rank -> descending integer score the rest of the pipeline reads.
@@ -564,7 +595,12 @@ fn rescore_semantic(
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
-    Ok(())
+}
+
+/// Whether a lexical candidate's line span overlaps a dense hit's, so the two
+/// refer to the same region and should count as one fused candidate.
+fn overlaps(candidate: &RetrievedChunk, hit: &DenseHit) -> bool {
+    candidate.start_line <= hit.range.end_line && hit.range.start_line <= candidate.end_line
 }
 
 /// Reorders the top-k candidates by an LLM relevance score, lifting them above
@@ -754,16 +790,19 @@ mod tests {
 
     use anyhow::Result;
 
+    use std::collections::BTreeMap;
+
     use crate::{
-        application::ports::{ChangeSource, CodeSearch, DenseRanker, DocumentLoader},
+        application::ports::{ChangeSource, CodeSearch, DocumentLoader},
         domain::{
-            Document, FileChange, Limits, LineRange, LoadedDocuments, RetrievedChunk, SearchHit,
+            DenseHit, Document, FileChange, Limits, LineRange, LoadedDocuments, RetrievedChunk,
+            SearchHit,
         },
     };
 
     use super::{
         ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput,
-        estimate_tokens, execute, reciprocal_rank_fusion, rescore_semantic,
+        estimate_tokens, execute, fuse_dense, reciprocal_rank_fusion,
     };
 
     #[test]
@@ -773,14 +812,6 @@ mod tests {
         let fused = reciprocal_rank_fusion(&[vec![0, 1, 2], vec![2, 0, 1]], 60.0);
         let order = fused.iter().map(|(index, _)| *index).collect::<Vec<_>>();
         assert_eq!(order, vec![0, 2, 1]);
-    }
-
-    struct MockDense(Vec<f32>);
-    impl DenseRanker for MockDense {
-        fn similarities(&self, _question: &str, candidates: &[String]) -> Result<Vec<f32>> {
-            assert_eq!(candidates.len(), self.0.len());
-            Ok(self.0.clone())
-        }
     }
 
     struct MockRerank(Vec<f32>);
@@ -813,9 +844,10 @@ mod tests {
     }
 
     #[test]
-    fn semantic_pass_lifts_a_lexically_weak_but_relevant_chunk() {
-        // Lexical order is a > b > c. The dense ranker judges c most similar, so
-        // fusion must promote c above b while a still leads.
+    fn dense_fusion_injects_a_new_chunk_and_boosts_it() {
+        // Lexical pool holds a.rs and b.rs. The dense index recalls c.rs (a file
+        // the lexical search never hit) as its top match, so fusion must inject
+        // c.rs and rank it above the lexically weaker b.rs.
         let chunk = |path: &str, score: usize| RetrievedChunk {
             path: path.to_owned(),
             start_line: 1,
@@ -824,14 +856,42 @@ mod tests {
             estimated_tokens: 10,
             content: format!("{path} body"),
         };
-        let mut candidates = vec![chunk("a", 100), chunk("b", 90), chunk("c", 80)];
-        let dense = MockDense(vec![0.0, 0.0, 1.0]);
-        rescore_semantic(&dense, "question", &mut candidates).unwrap();
+        let mut candidates = vec![chunk("a.rs", 100), chunk("b.rs", 90)];
+        let doc = Document {
+            path: "c.rs".to_owned(),
+            bytes: 12,
+            line_count: 1,
+            lines: vec!["dense body".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let mut by_path: BTreeMap<String, &Document> = BTreeMap::new();
+        by_path.insert("c.rs".to_owned(), &doc);
+        let hits = vec![DenseHit {
+            path: "c.rs".to_owned(),
+            range: LineRange {
+                start_line: 1,
+                end_line: 1,
+            },
+            similarity: 0.9,
+        }];
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000);
+        assert!(
+            candidates.iter().any(|candidate| candidate.path == "c.rs"),
+            "dense-only chunk was not injected"
+        );
         let order = candidates
             .iter()
             .map(|candidate| candidate.path.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(order, vec!["a", "c", "b"]);
+        // a.rs leads both rankings; c.rs (dense #1) outranks b.rs.
+        assert_eq!(order[0], "a.rs");
+        let c_pos = order.iter().position(|&p| p == "c.rs").unwrap();
+        let b_pos = order.iter().position(|&p| p == "b.rs").unwrap();
+        assert!(
+            c_pos < b_pos,
+            "dense recall did not outrank weak lexical: {order:?}"
+        );
     }
 
     #[test]

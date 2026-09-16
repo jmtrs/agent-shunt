@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    FileChange, InstallReport, Limits, LineRange, LoadedDocuments, MetricRecord, SearchHit,
-    WorkerRequest, WorkerResponse,
+    DenseRecall, FileChange, InstallReport, Limits, LineRange, LoadedDocuments, MetricRecord,
+    SearchHit, WorkerRequest, WorkerResponse,
 };
 
 /// Resolves the enclosing self-contained block of a hit line — a function,
@@ -21,6 +21,11 @@ pub trait StructureResolver {
         line: usize,
         max_span: usize,
     ) -> Option<LineRange>;
+
+    /// Every self-contained block in a file, for whole-file chunking by the
+    /// dense index: each definition (AST) or a fixed window (heuristic), none
+    /// exceeding `max_span` lines. Overlaps are the implementation's to avoid.
+    fn all_blocks(&self, path: &Path, lines: &[String], max_span: usize) -> Vec<LineRange>;
 }
 
 pub trait DocumentLoader {
@@ -49,12 +54,25 @@ pub trait ContextWorker {
     fn analyze(&self, request: &WorkerRequest, api_key: &str) -> Result<WorkerResponse>;
 }
 
-/// Scores each candidate chunk's semantic similarity to the question, in the
-/// same order. The application fuses these with the lexical ranking; it never
-/// sees raw embeddings, and the implementation owns the model, key, and
-/// transport. Optional: only the opt-in `--semantic` path constructs one.
-pub trait DenseRanker {
-    fn similarities(&self, question: &str, candidates: &[String]) -> Result<Vec<f32>>;
+/// Embeds a batch of texts into vectors, one per input in order. The dense
+/// index owns the model, key, transport, and batching; the application only
+/// fuses rankings, never touching raw vectors. Optional: built for `--semantic`.
+pub trait Embedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+/// Recalls the chunks of a whole repository whose meaning matches the question,
+/// from a persistent embedding index. This surfaces relevant code the lexical
+/// search never hit (few shared terms), which retrieval then fuses with the
+/// lexical ranking. Optional: only the opt-in `--semantic` path constructs one.
+pub trait DenseIndex {
+    fn recall(
+        &self,
+        question: &str,
+        root: &Path,
+        globs: &[String],
+        limits: &Limits,
+    ) -> Result<DenseRecall>;
 }
 
 /// Scores how directly each candidate answers the question, in `[0, 1]` and in

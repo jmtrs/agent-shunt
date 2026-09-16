@@ -82,6 +82,38 @@ impl StructureResolver for AstResolver {
         self.ast_block(path, lines, line, max_span)
             .or_else(|| crate::domain::enclosing_block(lines, line, max_span))
     }
+
+    fn all_blocks(&self, path: &Path, lines: &[String], max_span: usize) -> Vec<LineRange> {
+        // AST definition spans that fit the size bound; if the language is
+        // unsupported or has none, fall back to fixed windows so every file is
+        // still chunked for the index.
+        if let Some(language) = language_for(path) {
+            let source = lines.join("\n");
+            let key = content_key(path, &source);
+            let spans = {
+                if let Ok(mut cache) = self.cache.lock() {
+                    cache
+                        .entry(key)
+                        .or_insert_with(|| definition_spans(language, &source))
+                        .clone()
+                } else {
+                    definition_spans(language, &source)
+                }
+            };
+            let blocks = spans
+                .iter()
+                .filter(|span| span.end_line - span.start_line < max_span)
+                .map(|span| LineRange {
+                    start_line: span.start_line,
+                    end_line: span.end_line,
+                })
+                .collect::<Vec<_>>();
+            if !blocks.is_empty() {
+                return blocks;
+            }
+        }
+        crate::application::resolver::fixed_windows(lines, max_span)
+    }
 }
 
 fn content_key(path: &Path, source: &str) -> u64 {

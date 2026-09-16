@@ -81,9 +81,10 @@ agent-shunt retrieve --question "Where is auth enforced?" --dir .
 # Same, then ask the model about exactly that evidence
 agent-shunt retrieve --analyze --question "Where is auth enforced?" --dir .
 
-# Opt-in hybrid retrieval: fuse the local lexical ranking with a dense
-# embedding ranking so semantically related chunks surface even without
-# matching terms. Needs an embeddingModel in config; sends chunks to it.
+# Opt-in hybrid retrieval: a persistent embedding index recalls chunks from
+# across the whole repo by meaning, fused with the local lexical ranking, so
+# relevant code surfaces even from files the term search never hit. Needs an
+# embeddingModel in config; vectors are cached on disk per file + model.
 agent-shunt retrieve --semantic --question "Where is auth enforced?" --dir .
 
 # Opt-in precise re-ranking: the worker model scores the top candidates for
@@ -102,7 +103,7 @@ agent-shunt metrics   # aggregate usage and cost
 
 `retrieve` options: `--budget-tokens` (default 12000), `--context-lines` (8), `--max-hits` (200), `--model`, `--semantic`, `--rerank`. Retrieval tuning: `--mmr-lambda`, `--max-block-lines`, `--min-score-percent` (also `mmrLambda`/`maxBlockLines`/`minScorePercent` config keys; CLI wins).
 
-`--semantic` and `--rerank` are the two-stage retrieval design: broad recall via lexical + dense fusion, then precise reranking of the top by the model. Both are opt-in and send candidate chunks to a provider; the default `retrieve` stays fully local.
+`--semantic` and `--rerank` are the two-stage retrieval design: broad recall via lexical + dense fusion (a persistent, disk-cached embedding index over the whole repository, recalling code the term search missed), then precise reranking of the top by the model. Both are opt-in and send chunks to a provider; the default `retrieve` stays fully local. The index caches vectors under the platform cache dir (`~/.cache/agent-shunt/index`), keyed by file content and embedding model, so only changed files are re-embedded.
 
 Chunks snap to their enclosing definition — the function, method, or class with its signature, decorators, and doc-comments — via tree-sitter (Rust, Python, JS/TS/TSX, Go, Java, C/C++, Ruby, Bash, JSON), falling back to a language-agnostic indentation heuristic elsewhere. Build with `--no-default-features` to drop tree-sitter and use the heuristic everywhere.
 

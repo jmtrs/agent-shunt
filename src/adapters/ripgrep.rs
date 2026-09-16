@@ -62,7 +62,7 @@ const EXCLUDED_GLOBS: &[&str] = &[
 /// in the other order lets a caller include (`packages/**`) silently re-admit
 /// `node_modules`, `.git`, and `.env`, flooding results with dependency code and
 /// leaking secrets into analysis.
-fn apply_globs(command: &mut Command, globs: &[String]) {
+pub(crate) fn apply_globs(command: &mut Command, globs: &[String]) {
     for glob in globs {
         command.args(["--glob", glob]);
     }
@@ -618,7 +618,7 @@ fn filename_boost_of(mask: u16, term_weight: &[usize]) -> usize {
     weight_of(mask, term_weight) * FILENAME_BOOST
 }
 
-fn has_binary_extension(path: &str) -> bool {
+pub(crate) fn has_binary_extension(path: &str) -> bool {
     Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())

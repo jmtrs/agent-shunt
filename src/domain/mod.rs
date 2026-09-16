@@ -231,6 +231,25 @@ pub struct RetrievedChunk {
     pub content: String,
 }
 
+/// One chunk recalled by the persistent dense index: a block that the question
+/// resembles by meaning, with its cosine similarity. Its file is returned
+/// alongside (see [`DenseRecall`]) so retrieval can chunk and, for the analyze
+/// path, deliver it even when the lexical search never touched that file.
+#[derive(Debug, Clone)]
+pub struct DenseHit {
+    pub path: String,
+    pub range: LineRange,
+    pub similarity: f32,
+}
+
+/// The dense index's answer to a question: the top recalled chunks and the
+/// files they came from (deduplicated), ready to fuse with the lexical ranking.
+#[derive(Debug, Clone, Default)]
+pub struct DenseRecall {
+    pub documents: Vec<Document>,
+    pub hits: Vec<DenseHit>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrieveResult {

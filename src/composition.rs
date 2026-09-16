@@ -8,25 +8,28 @@ use crate::{
         claude_install::ClaudeInstaller,
         codex_install::CodexInstaller,
         credentials::EnvironmentCredentials,
+        embedding_index::EmbeddingIndex,
         filesystem::SecureFilesystem,
         gemini_install::GeminiInstaller,
         git::GitChangeSource,
         metrics::JsonlMetrics,
-        openai_compatible::{EmbeddingDenseRanker, LlmReranker, OpenAiCompatibleWorker},
+        openai_compatible::{EmbeddingClient, LlmReranker, OpenAiCompatibleWorker},
         opencode_install::OpencodeInstaller,
         repo_install::RepoInstaller,
         ripgrep::RipgrepSearch,
     },
     application::{
-        ports::{
-            CodeSearch, CredentialResolver, DenseRanker, HostInstaller, MetricsSink, Reranker,
-        },
+        ports::{CodeSearch, CredentialResolver, DenseIndex, HostInstaller, MetricsSink, Reranker},
         retrieve::{self, RetrieveInput},
         scan::{self, ScanInput},
     },
     config::Config,
     domain::{MetricRecord, Usage},
 };
+
+/// Dense chunks the index recalls per question, fused with the lexical ranking.
+/// Bounded so the fusion pool stays small and the budget still leads.
+const INDEX_TOP_K: usize = 24;
 
 /// The structure resolver wired into retrieval: the AST-backed resolver when
 /// the `ast` feature is on, the dependency-free heuristic otherwise. Both
@@ -150,11 +153,11 @@ impl Application {
         result.map(|result| result.value)
     }
 
-    /// Builds the opt-in dense re-ranker for `--semantic`. Requires an
+    /// Builds the embeddings client for `--semantic`. Requires an
     /// `embeddingModel`; the base URL defaults to the worker's, and the key
     /// resolves like the worker's (optionally via `embeddingApiKeyEnv`). Returns
     /// an error rather than silently degrading, since the flag was explicit.
-    fn dense_ranker_for(&self, config: &Config) -> Result<EmbeddingDenseRanker> {
+    fn embedding_client_for(&self, config: &Config) -> Result<(EmbeddingClient, String)> {
         let model = config.embedding_model.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "--semantic requires an embeddingModel in config (~/.config/agent-shunt/config.json)"
@@ -174,12 +177,17 @@ impl Application {
             local,
         );
         let api_key = credentials.resolve()?.api_key;
-        Ok(EmbeddingDenseRanker::new(
-            &base_url,
-            &model,
-            &api_key,
-            config.limits.clone(),
-        ))
+        let client = EmbeddingClient::new(&base_url, &model, &api_key, config.limits.clone());
+        Ok((client, model))
+    }
+
+    /// Directory holding the persistent embedding index (vectors cached per file
+    /// content and model), under the platform cache dir.
+    fn index_cache_dir() -> std::path::PathBuf {
+        dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("agent-shunt")
+            .join("index")
     }
 
     /// Builds the opt-in LLM re-ranker for `--rerank`, reusing the worker's
@@ -203,12 +211,24 @@ impl Application {
         config: &Config,
     ) -> Result<Value> {
         let started = Instant::now();
-        let dense = if semantic {
-            Some(self.dense_ranker_for(config)?)
+        // The embeddings client and the index that borrows it must outlive the
+        // execute call, so both are bound here before use.
+        let embeddings = if semantic {
+            Some(self.embedding_client_for(config)?)
         } else {
             None
         };
-        let dense = dense.as_ref().map(|ranker| ranker as &dyn DenseRanker);
+        let index = embeddings.as_ref().map(|(client, model)| {
+            EmbeddingIndex::new(
+                client,
+                &self.resolver,
+                Self::index_cache_dir(),
+                model,
+                INDEX_TOP_K,
+                input.max_block_lines,
+            )
+        });
+        let index = index.as_ref().map(|index| index as &dyn DenseIndex);
         let reranker = if rerank {
             Some(self.reranker_for(config)?)
         } else {
@@ -223,7 +243,7 @@ impl Application {
                 &self.changes,
                 &self.filesystem,
                 &self.resolver,
-                dense,
+                index,
                 reranker,
                 &credentials,
                 &worker,
@@ -251,7 +271,7 @@ impl Application {
                 &self.changes,
                 &self.filesystem,
                 &self.resolver,
-                dense,
+                index,
                 reranker,
                 &input,
             )

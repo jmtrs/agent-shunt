@@ -1,6 +1,7 @@
 pub mod claude_install;
 pub mod codex_install;
 pub mod credentials;
+pub mod embedding_index;
 pub mod filesystem;
 pub mod gemini_install;
 pub mod git;

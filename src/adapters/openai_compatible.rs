@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::{
-    application::ports::{ContextWorker, DenseRanker, Reranker},
+    application::ports::{ContextWorker, Embedder, Reranker},
     domain::{Limits, Usage, WorkerRequest, WorkerResponse},
 };
 
@@ -341,7 +341,7 @@ impl OpenAiCompatibleWorker {
 ///
 /// Same transport guarantees as the worker: redirects are never followed, env
 /// proxies are ignored, and request/response sizes and the timeout are bounded.
-pub struct EmbeddingDenseRanker {
+pub struct EmbeddingClient {
     base_url: String,
     is_openrouter: bool,
     model: String,
@@ -349,7 +349,7 @@ pub struct EmbeddingDenseRanker {
     limits: Limits,
 }
 
-impl EmbeddingDenseRanker {
+impl EmbeddingClient {
     pub fn new(base_url: &str, model: &str, api_key: &str, limits: Limits) -> Self {
         let base_url = base_url.trim_end_matches('/').to_owned();
         let is_openrouter = Url::parse(&base_url)
@@ -368,10 +368,9 @@ impl EmbeddingDenseRanker {
     fn endpoint(&self) -> String {
         format!("{}/embeddings", self.base_url)
     }
-}
 
-impl EmbeddingDenseRanker {
-    fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+    /// Embeds a single batch already known to fit the request budget.
+    fn embed_batch(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         let api_key = self.api_key.as_str();
         let mut body = json!({ "model": self.model, "input": inputs });
         if self.is_openrouter {
@@ -449,19 +448,35 @@ impl EmbeddingDenseRanker {
     }
 }
 
-impl DenseRanker for EmbeddingDenseRanker {
-    fn similarities(&self, question: &str, candidates: &[String]) -> Result<Vec<f32>> {
-        if candidates.is_empty() {
+/// Fraction of the request-size limit a single embedding batch may fill, before
+/// the batch is split. Leaves headroom for the JSON envelope and model field.
+const EMBED_BATCH_BUDGET: f64 = 0.8;
+
+impl Embedder for EmbeddingClient {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let mut inputs = Vec::with_capacity(candidates.len() + 1);
-        inputs.push(question.to_owned());
-        inputs.extend(candidates.iter().cloned());
-        let vectors = self.embed(&inputs)?;
-        let (query, rest) = vectors
-            .split_first()
-            .ok_or_else(|| anyhow::anyhow!("embedding response was empty"))?;
-        Ok(rest.iter().map(|vector| cosine(query, vector)).collect())
+        // Split into batches so no request exceeds the size limit — a repo index
+        // can hold thousands of chunks that never fit one call.
+        let budget = (self.limits.max_request_bytes as f64 * EMBED_BATCH_BUDGET) as usize;
+        let mut vectors = Vec::with_capacity(texts.len());
+        let mut batch: Vec<String> = Vec::new();
+        let mut batch_bytes = 0usize;
+        for text in texts {
+            let cost = text.len() + 8;
+            if !batch.is_empty() && batch_bytes + cost > budget {
+                vectors.extend(self.embed_batch(&batch)?);
+                batch.clear();
+                batch_bytes = 0;
+            }
+            batch.push(text.clone());
+            batch_bytes += cost;
+        }
+        if !batch.is_empty() {
+            vectors.extend(self.embed_batch(&batch)?);
+        }
+        Ok(vectors)
     }
 }
 
@@ -617,7 +632,7 @@ fn parse_scores(content: &str, expected: usize) -> Result<Vec<f32>> {
 
 /// Cosine similarity of two vectors; `0.0` when either is degenerate or the
 /// lengths differ, so a bad vector never poisons the ranking.
-fn cosine(left: &[f32], right: &[f32]) -> f32 {
+pub(crate) fn cosine(left: &[f32], right: &[f32]) -> f32 {
     if left.len() != right.len() {
         return 0.0;
     }
@@ -688,13 +703,11 @@ fn result_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use crate::{
-        application::ports::{ContextWorker, DenseRanker},
+        application::ports::{ContextWorker, Embedder},
         domain::{Limits, WorkerRequest},
     };
 
-    use super::{
-        EmbeddingDenseRanker, OpenAiCompatibleWorker, cosine, parse_scores, result_schema,
-    };
+    use super::{EmbeddingClient, OpenAiCompatibleWorker, cosine, parse_scores, result_schema};
 
     #[test]
     fn parse_scores_accepts_wrapped_or_bare_arrays_and_clamps() {
@@ -719,11 +732,11 @@ mod tests {
         assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
     }
 
-    /// Local HTTP stub for the embeddings transport: the query and candidates go
-    /// to `/embeddings` with the key as a Bearer token, and the returned vectors
-    /// yield cosine similarities that rank the aligned candidate first.
+    /// Local HTTP stub for the embeddings transport: inputs go to `/embeddings`
+    /// with the key as a Bearer token, and the returned vectors come back in
+    /// order so cosine ranks the aligned candidate above the orthogonal one.
     #[test]
-    fn dense_ranker_posts_to_embeddings_and_orders_by_similarity() {
+    fn embedder_posts_to_embeddings_and_returns_vectors() {
         use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream};
 
@@ -756,8 +769,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&mut stream);
-            // Query [1,0]; first candidate orthogonal, second aligned.
-            let body = br#"{"data":[{"embedding":[1.0,0.0]},{"embedding":[0.0,1.0]},{"embedding":[1.0,0.0]}]}"#;
+            // Two vectors: orthogonal to and aligned with a [1,0] query.
+            let body = br#"{"data":[{"embedding":[0.0,1.0]},{"embedding":[1.0,0.0]}]}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -769,19 +782,20 @@ mod tests {
             request
         });
 
-        let ranker = EmbeddingDenseRanker::new(
+        let client = EmbeddingClient::new(
             &format!("http://127.0.0.1:{port}/v1"),
             "embed-model",
             "secret",
             Limits::default(),
         );
-        let sims = ranker
-            .similarities("query", &["orthogonal".to_owned(), "aligned".to_owned()])
+        let vectors = client
+            .embed(&["orthogonal".to_owned(), "aligned".to_owned()])
             .unwrap();
-        assert_eq!(sims.len(), 2);
+        assert_eq!(vectors.len(), 2);
+        let query = [1.0f32, 0.0];
         assert!(
-            sims[1] > sims[0],
-            "aligned candidate must rank first: {sims:?}"
+            cosine(&query, &vectors[1]) > cosine(&query, &vectors[0]),
+            "aligned vector must rank first: {vectors:?}"
         );
 
         let request = server.join().unwrap().to_lowercase();
