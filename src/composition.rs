@@ -22,8 +22,8 @@ use crate::{
     },
     application::{
         ports::{
-            CodeSearch, CredentialResolver, DenseIndex, HostInstaller, MetricsSink, QueryExpander,
-            Reranker,
+            CodeSearch, CredentialResolver, DenseIndex, Embedder, HostInstaller, MetricsSink,
+            QueryExpander, Reranker,
         },
         retrieve::{self, RetrieveInput},
         scan::{self, ScanInput},
@@ -186,6 +186,45 @@ impl Application {
         Ok((client, model))
     }
 
+    /// Builds the embedder `--semantic` uses, chosen by `embeddingProvider`:
+    /// `"http"` (default) is the OpenAI-compatible `/embeddings` client; `"local"`
+    /// is the keyless on-device model. Returns the embedder and the tag under
+    /// which its vectors are cached, so switching providers never reuses vectors
+    /// from another model.
+    fn embedder_for(&self, config: &Config) -> Result<(Box<dyn Embedder>, String)> {
+        match config.embedding_provider.as_deref().unwrap_or("http") {
+            "local" => self.local_embedder_for(config),
+            _ => {
+                let (client, model) = self.embedding_client_for(config)?;
+                Ok((Box::new(client), model))
+            }
+        }
+    }
+
+    /// Loads the local embedder, defaulting to `bge-small-en-v1.5` when no
+    /// `embeddingModel` is set. Cache tag is prefixed `local:` so it never
+    /// collides with an HTTP model of the same name.
+    #[cfg(feature = "local-embed")]
+    fn local_embedder_for(&self, config: &Config) -> Result<(Box<dyn Embedder>, String)> {
+        use crate::adapters::local_embedding::LocalEmbedder;
+        let model = config
+            .embedding_model
+            .clone()
+            .unwrap_or_else(|| "bge-small-en-v1.5".to_owned());
+        let embedder = LocalEmbedder::new(&model)?;
+        Ok((Box::new(embedder), format!("local:{model}")))
+    }
+
+    /// Without the `local-embed` feature the on-device backend is not compiled
+    /// in, so selecting it fails with a build hint instead of a link error.
+    #[cfg(not(feature = "local-embed"))]
+    fn local_embedder_for(&self, _config: &Config) -> Result<(Box<dyn Embedder>, String)> {
+        anyhow::bail!(
+            "embeddingProvider \"local\" requires a build with the local-embed feature \
+             (cargo install --path . --features local-embed)"
+        )
+    }
+
     /// Directory holding the persistent embedding index (vectors cached per file
     /// content and model), under the platform cache dir.
     fn index_cache_dir() -> std::path::PathBuf {
@@ -238,13 +277,13 @@ impl Application {
         // The embeddings client and the index that borrows it must outlive the
         // execute call, so both are bound here before use.
         let embeddings = if semantic {
-            Some(self.embedding_client_for(config)?)
+            Some(self.embedder_for(config)?)
         } else {
             None
         };
-        let index = embeddings.as_ref().map(|(client, model)| {
+        let index = embeddings.as_ref().map(|(embedder, model)| {
             EmbeddingIndex::new(
-                client,
+                embedder.as_ref(),
                 &self.resolver,
                 Self::index_cache_dir(),
                 model,
