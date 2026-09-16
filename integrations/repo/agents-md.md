@@ -10,4 +10,6 @@ Inspect the returned line-numbered chunks; source ranges are evidence, ranking a
 
 Reviewing a change or freshly written code? Add `--diff` to scope retrieval to what you touched — tracked modifications and untracked new files — which plain retrieval can otherwise bury under older files.
 
+Invoke it as exactly `agent-shunt` — it is on `PATH`. Never prefix an install directory (`~/.local/bin/...`, `~/.cargo/bin/...`, etc.): guessing a path is the main way this tool gets wrongly reported as missing. If you think you need an absolute path, resolve it with `command -v agent-shunt` instead of inventing one.
+
 Use normal grep and ranged reads when the exact file, symbol, or line range is already known. If retrieval finds no useful evidence, every worker model fails, or the CLI is unavailable, continue with normal targeted repository reads; do not block the task.

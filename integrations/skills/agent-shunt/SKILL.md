@@ -74,6 +74,8 @@ Retrieval returns `chunks[]` (path + startLine/endLine = evidence). `--analyze` 
 
 Use normal `rg` and ranged reads when the exact file, symbol, or line range is already known. Never replace a small targeted read with the shunt.
 
+Invoke it as exactly `agent-shunt` — it is on `PATH`. Never prefix an install directory (no `~/.local/bin/...`, `~/.cargo/bin/...`, or similar): guessing a path is the main way this tool gets wrongly reported as missing. If you believe you need an absolute path, resolve it — `command -v agent-shunt` — instead of inventing one. Only if that prints nothing is the tool genuinely absent.
+
 If the CLI seems unavailable or misconfigured, check locally (no remote request) before falling back:
 
 ```bash

@@ -18,6 +18,7 @@ agent-shunt scan --path <file> --question "<what to extract>"
 
 Rules:
 - Reviewing a change or freshly written code? Add --diff to scope retrieval to what you touched (tracked modifications and untracked new files), which plain retrieval can otherwise bury under older files.
+- Invoke it as exactly `agent-shunt` — it is on PATH. Never prefix an install directory (~/.local/bin/..., ~/.cargo/bin/..., etc.); guessing a path is the main way this tool gets wrongly reported as missing. If you think you need an absolute path, resolve it with `command -v agent-shunt` instead of inventing one.
 - Use normal grep and ranged reads when the exact file, symbol, or line range is already known; never replace a small targeted read with the shunt.
 - Do not pass secrets, generated artifacts, databases, binaries, or unrelated files.
 - If retrieval finds no useful evidence, every worker model fails, or the CLI is unavailable, continue with normal targeted repository reads. Do not block the task and do not claim model output is verified beyond its locally validated references.
