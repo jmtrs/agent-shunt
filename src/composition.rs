@@ -293,8 +293,21 @@ impl Application {
                 })
             })
         };
+        // Tag the metric with the opt-in modifiers so the `--semantic`/`--rerank`
+        // and `--analyze` paths are counted and timed distinctly in the history,
+        // rather than blurred into one "retrieve" bucket.
+        let mut operation = String::from("retrieve");
+        if semantic {
+            operation.push_str("+semantic");
+        }
+        if rerank {
+            operation.push_str("+rerank");
+        }
+        if analyze {
+            operation.push_str("+analyze");
+        }
         self.record_result(
-            "retrieve",
+            &operation,
             analyze.then_some(config.model.as_str()),
             started,
             &result,

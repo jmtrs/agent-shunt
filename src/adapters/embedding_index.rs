@@ -33,6 +33,11 @@ pub struct EmbeddingIndex<'a> {
     max_chunks: usize,
 }
 
+/// Cache-format version. Bumped whenever the chunking that produces the cached
+/// blocks changes, so a new binary never reuses vectors computed under different
+/// block boundaries even when a file's content is unchanged.
+const INDEX_VERSION: u32 = 1;
+
 /// One embedded block: the file it belongs to and its line span.
 struct Block {
     file: usize,
@@ -105,6 +110,7 @@ impl<'a> EmbeddingIndex<'a> {
         content: &str,
     ) -> Result<(Vec<LineRange>, Vec<Vec<f32>>)> {
         let mut hasher = DefaultHasher::new();
+        INDEX_VERSION.hash(&mut hasher);
         self.model_tag.hash(&mut hasher);
         content.hash(&mut hasher);
         let key = hasher.finish();
