@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "name": "gson-v1",
+  "repository": {
+    "url": "https://github.com/google/gson",
+    "commit": "854c8255b625cf1e13c701a83ea9ccb4caaa576a"
+  },
+  "budgetTokens": 1200,
+  "contextLines": 8,
+  "maxHits": 40,
+  "globs": [
+    "gson/src/main/java/**/*.java",
+    "!**/package-info.java"
+  ],
+  "ks": [1, 3, 5],
+  "strategies": ["lexical", "prf"],
+  "cases": [
+    {
+      "id": "adapter-resolution-cache",
+      "question": "How does Gson resolve a TypeAdapter through registered factories, handle recursive adapter creation, cache completed adapters, and fail when no factory supports a requested type?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/Gson.java" }
+      ]
+    },
+    {
+      "id": "builder-factory-assembly",
+      "question": "How does the builder assemble a Gson instance from configuration, instance creators, user factories, hierarchy factories, serialization policies, and built-in composite type adapters?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/GsonBuilder.java" }
+      ]
+    },
+    {
+      "id": "reflective-field-binding",
+      "question": "How are Java classes serialized and deserialized reflectively by discovering fields or record accessors, applying naming and exclusion rules, resolving field adapters, and reading or writing bound fields?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/internal/bind/ReflectiveTypeAdapterFactory.java" }
+      ]
+    },
+    {
+      "id": "object-construction-strategy",
+      "question": "How does Gson choose a way to construct an object using registered instance creators, special collection or map implementations, accessible no-args constructors, reflection filters, or unsafe allocation fallbacks?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/internal/ConstructorConstructor.java" }
+      ]
+    },
+    {
+      "id": "complex-map-keys",
+      "question": "How are maps read and written when keys may be primitive or complex JSON values, including duplicate-key detection and the choice between JSON objects and arrays of key-value pairs?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/internal/bind/MapTypeAdapterFactory.java" }
+      ]
+    },
+    {
+      "id": "collection-elements",
+      "question": "How does Gson create adapters for collection types, resolve the element type adapter and collection constructor, then read JSON arrays into collections and write collection elements back out?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/internal/bind/CollectionTypeAdapterFactory.java" }
+      ]
+    },
+    {
+      "id": "streaming-json-reader",
+      "question": "How does the streaming JSON reader maintain parser scope and path state, enforce strictness and nesting limits, peek at tokens, consume names and values, and skip nested values?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/stream/JsonReader.java" }
+      ]
+    },
+    {
+      "id": "streaming-json-writer",
+      "question": "How does the streaming JSON writer manage object and array nesting, deferred property names, separators, null serialization, escaping, formatting, strictness, and the final document state?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/stream/JsonWriter.java" }
+      ]
+    },
+    {
+      "id": "generic-type-token",
+      "question": "How does TypeToken capture generic type information, derive raw types, compare type tokens, reject unresolved type variables, and create parameterized or array type tokens at runtime?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/reflect/TypeToken.java" }
+      ]
+    },
+    {
+      "id": "field-class-exclusion",
+      "question": "How does Gson decide whether classes and fields are excluded from serialization or deserialization based on version annotations, modifiers, synthetic fields, inner classes, @Expose, and custom exclusion strategies?",
+      "expected": [
+        { "path": "gson/src/main/java/com/google/gson/internal/Excluder.java" }
+      ]
+    }
+  ]
+}

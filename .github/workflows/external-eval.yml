@@ -152,3 +152,37 @@ jobs:
           eval/external/cobra.json
           --root "$RUNNER_TEMP/cobra"
           --json
+
+  gson:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-shunt
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Checkout pinned Gson corpus target
+        run: |
+          git clone --filter=blob:none https://github.com/google/gson.git "$RUNNER_TEMP/gson"
+          git -C "$RUNNER_TEMP/gson" checkout --detach 854c8255b625cf1e13c701a83ea9ccb4caaa576a
+          test "$(git -C "$RUNNER_TEMP/gson" rev-parse HEAD)" = "854c8255b625cf1e13c701a83ea9ccb4caaa576a"
+
+      - name: Run Gson retrieval corpus
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/gson.json
+          --root "$RUNNER_TEMP/gson"
+
+      - name: Print per-case diagnostics
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/gson.json
+          --root "$RUNNER_TEMP/gson"
+          --json
