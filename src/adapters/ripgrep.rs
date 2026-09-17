@@ -393,7 +393,11 @@ fn filename_hits(
         if has_binary_extension(&path) {
             continue;
         }
-        let normalized = path.to_lowercase();
+        let normalized = Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let matched_terms = forms.iter().enumerate().fold(0u16, |mask, (index, forms)| {
             mask | (u16::from(forms.iter().any(|form| normalized.contains(form.as_str()))) << index)
         });
@@ -813,6 +817,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits.first().map(|hit| hit.path.as_str()), Some("target.rs"));
+    }
+
+    #[test]
+    fn filename_hits_ignore_parent_directory_names() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("matcher")).unwrap();
+        fs::write(
+            root.path().join("matcher/noise.rs"),
+            "const marker: usize = 1;\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("matcher.rs"), "const marker: usize = 1;\n").unwrap();
+
+        let hits =
+            super::filename_hits(root.path(), &[super::term_forms("matcher")], &[], 100).unwrap();
+
+        assert!(hits.iter().any(|hit| hit.path == "matcher.rs"));
+        assert!(hits.iter().all(|hit| hit.path != "matcher/noise.rs"));
     }
 
     #[test]
