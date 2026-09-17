@@ -1,0 +1,66 @@
+name: Semantic retrieval evaluation
+
+on:
+  pull_request:
+    paths:
+      - "examples/semantic_eval.rs"
+      - ".github/workflows/semantic-eval.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semantic:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ripgrep
+            repo: https://github.com/BurntSushi/ripgrep.git
+            commit: 3fce3b5bb0236da2df6d99672afb8a719642eca7
+            corpus: ripgrep
+          - name: flask
+            repo: https://github.com/pallets/flask.git
+            commit: d73fa1cdcbd8b1465c151db8924ba58b1dd14e35
+            corpus: flask
+          - name: hono
+            repo: https://github.com/honojs/hono.git
+            commit: 098e11912ab244c5c33931de007f04dc8e3c2929
+            corpus: hono
+          - name: cobra
+            repo: https://github.com/spf13/cobra.git
+            commit: adbc8813901bba65827259daa8e22ff94ec1f30e
+            corpus: cobra
+          - name: gson
+            repo: https://github.com/google/gson.git
+            commit: 854c8255b625cf1e13c701a83ea9ccb4caaa576a
+            corpus: gson
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: semantic-${{ matrix.name }}
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Clone pinned target
+        run: |
+          git clone --filter=blob:none "${{ matrix.repo }}" "$RUNNER_TEMP/target"
+          git -C "$RUNNER_TEMP/target" checkout --detach "${{ matrix.commit }}"
+          test "$(git -C "$RUNNER_TEMP/target" rev-parse HEAD)" = "${{ matrix.commit }}"
+
+      - name: Compare lexical and local semantic retrieval
+        run: |
+          cargo run --release --features local-embed --example semantic_eval -- \
+            "eval/external/${{ matrix.corpus }}.json" \
+            --root "$RUNNER_TEMP/target"
