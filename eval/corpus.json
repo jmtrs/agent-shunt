@@ -73,12 +73,12 @@
   ],
   "gates": {
     "lexical": {
-      "recallAt": { "5": 0.75 },
+      "hitAt": { "5": 0.75 },
       "minMrr": 0.45,
       "maxAvgTokens": 1200
     },
     "prf": {
-      "recallAt": { "5": 0.75 },
+      "hitAt": { "5": 0.75 },
       "minMrr": 0.45,
       "maxAvgTokens": 1200
     }
