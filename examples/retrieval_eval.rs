@@ -92,8 +92,11 @@ struct ExpectedEvidence {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Gate {
-    #[serde(default)]
-    recall_at: BTreeMap<usize, f64>,
+    /// Fraction of cases with at least one acceptable target in the first K
+    /// chunks. `recallAt` is retained as a v1 input alias for existing corpora;
+    /// reports and new corpus examples use the precise `hitAt` name.
+    #[serde(default, alias = "recallAt")]
+    hit_at: BTreeMap<usize, f64>,
     min_mrr: Option<f64>,
     max_avg_tokens: Option<f64>,
 }
@@ -103,7 +106,7 @@ struct Gate {
 struct StrategyReport {
     strategy: String,
     cases: usize,
-    recall_at: BTreeMap<usize, f64>,
+    hit_at: BTreeMap<usize, f64>,
     mrr: f64,
     avg_tokens: f64,
     avg_latency_ms: f64,
@@ -364,7 +367,9 @@ fn run_strategy(root: &Path, corpus: &Corpus, strategy: Strategy) -> Result<Stra
         });
     }
 
-    let recall_at = corpus
+    // This is Hit@K, not recall: every case succeeds when any one of its
+    // acceptable alternative targets appears within the first K chunks.
+    let hit_at = corpus
         .ks
         .iter()
         .copied()
@@ -405,7 +410,7 @@ fn run_strategy(root: &Path, corpus: &Corpus, strategy: Strategy) -> Result<Stra
     Ok(StrategyReport {
         strategy: strategy.name().to_owned(),
         cases: results.len(),
-        recall_at,
+        hit_at,
         mrr,
         avg_tokens,
         avg_latency_ms,
@@ -433,11 +438,11 @@ fn matches_target(chunk: &RetrievedChunk, target: &ExpectedEvidence) -> bool {
 
 fn check_gate(report: &StrategyReport, gate: &Gate) -> Vec<String> {
     let mut failures = Vec::new();
-    for (k, minimum) in &gate.recall_at {
-        let actual = report.recall_at.get(k).copied().unwrap_or(0.0);
+    for (k, minimum) in &gate.hit_at {
+        let actual = report.hit_at.get(k).copied().unwrap_or(0.0);
         if actual + f64::EPSILON < *minimum {
             failures.push(format!(
-                "{} recall@{} {:.3} < {:.3}",
+                "{} hit@{} {:.3} < {:.3}",
                 report.strategy, k, actual, minimum
             ));
         }
@@ -472,13 +477,13 @@ fn print_human(corpus: &Corpus, reports: &[StrategyReport], failures: &[String])
     }
     print!("strategy");
     for k in &corpus.ks {
-        print!("\trecall@{k}");
+        print!("\thit@{k}");
     }
     println!("\tMRR\tavg tokens\tavg ms\tp95 ms");
     for report in reports {
         print!("{}", report.strategy);
         for k in &corpus.ks {
-            print!("\t{:.3}", report.recall_at.get(k).copied().unwrap_or(0.0));
+            print!("\t{:.3}", report.hit_at.get(k).copied().unwrap_or(0.0));
         }
         println!(
             "\t{:.3}\t{:.1}\t{:.1}\t{:.1}",
