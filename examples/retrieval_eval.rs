@@ -225,7 +225,10 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
             bail!("repository url must not be empty");
         }
         if repository.commit.len() != 40
-            || !repository.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !repository
+                .commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
         {
             bail!("repository commit must be a full 40-character Git SHA");
         }
@@ -266,9 +269,7 @@ fn verify_repository(root: &Path, expected: &RepositorySpec) -> Result<()> {
 
     let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
     if !status.is_empty() {
-        bail!(
-            "repository checkout is dirty; external benchmarks require an exact clean commit"
-        );
+        bail!("repository checkout is dirty; external benchmarks require an exact clean commit");
     }
     Ok(())
 }
@@ -434,7 +435,11 @@ fn check_gate(report: &StrategyReport, gate: &Gate) -> Vec<String> {
 fn print_human(corpus: &Corpus, reports: &[StrategyReport], failures: &[String]) {
     println!("corpus: {} ({} cases)", corpus.name, corpus.cases.len());
     if let Some(repository) = &corpus.repository {
-        println!("repository: {} @ {}", repository.url, &repository.commit[..12]);
+        println!(
+            "repository: {} @ {}",
+            repository.url,
+            &repository.commit[..12]
+        );
     }
     print!("strategy");
     for k in &corpus.ks {
