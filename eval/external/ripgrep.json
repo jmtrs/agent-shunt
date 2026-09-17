@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "name": "ripgrep-v1",
+  "repository": {
+    "url": "https://github.com/BurntSushi/ripgrep",
+    "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7"
+  },
+  "budgetTokens": 1200,
+  "contextLines": 8,
+  "maxHits": 40,
+  "globs": [
+    "!target/**",
+    "!benchsuite/**",
+    "!tests/**",
+    "!fuzz/**"
+  ],
+  "ks": [1, 3, 5],
+  "strategies": ["lexical", "prf"],
+  "cases": [
+    {
+      "id": "config-arguments",
+      "question": "How are user configuration file options loaded from RIPGREP_CONFIG_PATH and injected into the command line arguments?",
+      "expected": [
+        { "path": "crates/core/flags/config.rs" },
+        { "path": "crates/core/flags/parse.rs" }
+      ]
+    },
+    {
+      "id": "compressed-search",
+      "question": "How does compressed-file search choose and invoke external decompressors for formats such as gzip bzip2 xz and zstd?",
+      "expected": [
+        { "path": "crates/cli/src/decompress.rs" }
+      ]
+    },
+    {
+      "id": "binary-detection",
+      "question": "How does the searcher heuristically detect binary data and decide whether to stop after encountering the configured quit byte?",
+      "expected": [
+        { "path": "crates/searcher/src/searcher/mod.rs" },
+        { "path": "crates/searcher/src/searcher/core.rs" }
+      ]
+    },
+    {
+      "id": "parallel-ignore-walk",
+      "question": "How are git-related ignore rules applied while directories are traversed in parallel across worker threads?",
+      "expected": [
+        { "path": "crates/ignore/src/walk.rs" }
+      ]
+    },
+    {
+      "id": "gitignore-matching",
+      "question": "How are gitignore patterns parsed and matched against a path or any of its parent directories?",
+      "expected": [
+        { "path": "crates/ignore/src/gitignore.rs" }
+      ]
+    },
+    {
+      "id": "file-type-globs",
+      "question": "How are named file types such as rust or c selected or negated and compiled into glob matchers for file paths?",
+      "expected": [
+        { "path": "crates/ignore/src/types.rs" }
+      ]
+    },
+    {
+      "id": "hyperlink-format",
+      "question": "How are hyperlink format variables such as path host line and column resolved and rendered into links for search matches?",
+      "expected": [
+        { "path": "crates/printer/src/hyperlink/mod.rs" }
+      ]
+    },
+    {
+      "id": "json-events",
+      "question": "Where are JSON begin match context and end messages produced from search sink events and serialized for output?",
+      "expected": [
+        { "path": "crates/printer/src/json.rs" }
+      ]
+    },
+    {
+      "id": "pcre2-jit",
+      "question": "How does the PCRE2 matcher compile patterns configure JIT behavior and perform matching or capture searches?",
+      "expected": [
+        { "path": "crates/pcre2/src/matcher.rs" }
+      ]
+    },
+    {
+      "id": "regex-literal-extraction",
+      "question": "How does the regex implementation extract useful inner literals for faster searching and decide when to defer to the regex engine?",
+      "expected": [
+        { "path": "crates/regex/src/literal.rs" }
+      ]
+    }
+  ]
+}
