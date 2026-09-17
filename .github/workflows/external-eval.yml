@@ -1,0 +1,40 @@
+name: External retrieval evaluation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "eval/external/**"
+      - "examples/retrieval_eval.rs"
+      - ".github/workflows/external-eval.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ripgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-shunt
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Checkout pinned ripgrep corpus target
+        run: |
+          git clone --filter=blob:none https://github.com/BurntSushi/ripgrep.git "$RUNNER_TEMP/ripgrep"
+          git -C "$RUNNER_TEMP/ripgrep" checkout --detach 3fce3b5bb0236da2df6d99672afb8a719642eca7
+          test "$(git -C "$RUNNER_TEMP/ripgrep" rev-parse HEAD)" = "3fce3b5bb0236da2df6d99672afb8a719642eca7"
+
+      - name: Run ripgrep retrieval corpus
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/ripgrep.json
+          --root "$RUNNER_TEMP/ripgrep"
