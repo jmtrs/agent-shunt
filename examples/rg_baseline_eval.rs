@@ -172,7 +172,11 @@ fn main() -> Result<ExitCode> {
         .with_context(|| format!("cannot read corpus {}", corpus_path.display()))?;
     let corpus: Corpus = serde_json::from_str(&raw)
         .with_context(|| format!("invalid corpus {}", corpus_path.display()))?;
-    ensure!(corpus.version == 1, "unsupported corpus version {}", corpus.version);
+    ensure!(
+        corpus.version == 1,
+        "unsupported corpus version {}",
+        corpus.version
+    );
     ensure!(!corpus.cases.is_empty(), "corpus contains no cases");
 
     let root = fs::canonicalize(&root)
@@ -254,7 +258,10 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
 
         results.push(CaseResult {
             id: case.id.clone(),
-            agent_chunk_first_relevant_rank: first_relevant_chunk_rank(&agent.chunks, &case.expected),
+            agent_chunk_first_relevant_rank: first_relevant_chunk_rank(
+                &agent.chunks,
+                &case.expected,
+            ),
             agent_file_first_relevant_rank: first_relevant_file_rank(&agent_files, &case.expected),
             rg_file_first_relevant_rank: first_relevant_file_rank(&rg_files, &case.expected),
             agent_tokens: agent.estimated_tokens,
@@ -317,7 +324,11 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
         median_agent_vs_rg_top5_reduction_pct: median(&reductions),
         p95_agent_tokens: percentile95(&agent_values),
         p95_rg_top5_tokens: percentile95(&rg_top5_values),
-        avg_rg_matched_files: results.iter().map(|r| r.rg_matched_files as f64).sum::<f64>() / count,
+        avg_rg_matched_files: results
+            .iter()
+            .map(|r| r.rg_matched_files as f64)
+            .sum::<f64>()
+            / count,
         rg_no_match_cases: results.iter().filter(|r| r.rg_matched_files == 0).count(),
         results,
     })
@@ -352,7 +363,9 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
     }
     command.args(["--", &pattern, "."]);
 
-    let output = command.output().context("failed to execute ripgrep baseline")?;
+    let output = command
+        .output()
+        .context("failed to execute ripgrep baseline")?;
     ensure!(
         output.status.success() || output.status.code() == Some(1),
         "ripgrep baseline failed with status {}: {}",
@@ -360,7 +373,10 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
         String::from_utf8_lossy(&output.stderr).trim()
     );
 
-    let lowered_terms = terms.iter().map(|term| term.to_lowercase()).collect::<Vec<_>>();
+    let lowered_terms = terms
+        .iter()
+        .map(|term| term.to_lowercase())
+        .collect::<Vec<_>>();
     let mut scores = HashMap::<String, RgFileScore>::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -369,7 +385,10 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
         if event.get("type").and_then(|value| value.as_str()) != Some("match") {
             continue;
         }
-        let Some(path) = event.pointer("/data/path/text").and_then(|value| value.as_str()) else {
+        let Some(path) = event
+            .pointer("/data/path/text")
+            .and_then(|value| value.as_str())
+        else {
             continue;
         };
         let text = event
@@ -377,7 +396,9 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_lowercase();
-        let score = scores.entry(path.strip_prefix("./").unwrap_or(path).to_owned()).or_default();
+        let score = scores
+            .entry(path.strip_prefix("./").unwrap_or(path).to_owned())
+            .or_default();
         score.matching_lines += 1;
         for (index, term) in lowered_terms.iter().enumerate() {
             if text.contains(term) {
@@ -398,7 +419,11 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
     Ok(ranked.into_iter().map(|(path, _)| path).collect())
 }
 
-fn whole_file_tokens(root: &Path, loader: &SecureFilesystem, paths: &[String]) -> Result<Vec<usize>> {
+fn whole_file_tokens(
+    root: &Path,
+    loader: &SecureFilesystem,
+    paths: &[String],
+) -> Result<Vec<usize>> {
     paths
         .iter()
         .map(|path| {
@@ -424,10 +449,17 @@ fn distinct_chunk_paths(chunks: &[RetrievedChunk]) -> Vec<String> {
     paths
 }
 
-fn first_relevant_chunk_rank(chunks: &[RetrievedChunk], expected: &[ExpectedEvidence]) -> Option<usize> {
+fn first_relevant_chunk_rank(
+    chunks: &[RetrievedChunk],
+    expected: &[ExpectedEvidence],
+) -> Option<usize> {
     chunks
         .iter()
-        .position(|chunk| expected.iter().any(|target| matches_chunk_target(chunk, target)))
+        .position(|chunk| {
+            expected
+                .iter()
+                .any(|target| matches_chunk_target(chunk, target))
+        })
         .map(|index| index + 1)
 }
 
@@ -455,7 +487,10 @@ where
     RG_TOP_K
         .into_iter()
         .map(|k| {
-            let hits = results.iter().filter(|result| rank(result).is_some_and(|r| r <= k)).count();
+            let hits = results
+                .iter()
+                .filter(|result| rank(result).is_some_and(|r| r <= k))
+                .count();
             (k, hits as f64 / results.len() as f64)
         })
         .collect()
@@ -576,7 +611,11 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
 fn print_human(report: &Report, repository: Option<&RepositorySpec>) {
     println!("corpus: {} ({} cases)", report.corpus, report.cases);
     if let Some(repository) = repository {
-        println!("repository: {} @ {}", repository.url, &repository.commit[..12]);
+        println!(
+            "repository: {} @ {}",
+            repository.url,
+            &repository.commit[..12]
+        );
     }
     println!(
         "agent chunk quality: hit@1={:.3} hit@3={:.3} hit@5={:.3} MRR={:.3}",
