@@ -2,32 +2,54 @@
 
 Date: 2026-09-17
 
-These results measure how much source context `agent-shunt` lexical retrieval avoids sending after it has already identified useful files.
+These results measure source-context efficiency and retrieval quality for `agent-shunt` lexical retrieval across 50 human-authored architecture and implementation questions over five pinned open-source repositories in Rust, Python, TypeScript, Go, and Java.
+
+Two baselines are reported:
+
+1. **Same selected files in full**: a deliberately conservative baseline that is given `agent-shunt`'s selected files for free and reads those files completely.
+2. **Plain ripgrep + whole-file reads**: a reproducible search workflow that receives the same preprocessed query terms as `agent-shunt`, ranks matching files, and reads the top 1, 3, or 5 files completely.
+
+All token counts below are **estimated context tokens**, not provider billing tokens.
 
 ## Headline
 
-Across **50 architecture and implementation questions** over five pinned open-source repositories in Rust, Python, TypeScript, Go, and Java, `agent-shunt` delivered **51,864 estimated context tokens** versus **912,071** tokens for reading the exact same selected files in full.
+Across the current 50-case corpus, `agent-shunt` delivered **51,835 estimated context tokens**.
 
-That is an aggregate **94.3% context reduction**, or **17.59x less context**, with aggregate lexical retrieval quality of **Hit@1 50%**, **Hit@3 74%**, **Hit@5 78%**, and **MRR 0.602**.
+Against reading the exact same selected files in full, the baseline required **905,462** estimated tokens. That is an aggregate **94.28% context reduction**, or **17.47x less context**.
 
-The comparison is deliberately conservative. The baseline is given perfect file selection for free: for each question it reads only the distinct files that actually contributed chunks selected by `agent-shunt`. It does not read the whole repository and it does not include extra files returned by a broader search.
+Against the more operational `rg + whole-file reads` baseline:
 
-## Results by repository
+| Comparison | agent-shunt context | Baseline context | Reduction | Compression |
+| --- | ---: | ---: | ---: | ---: |
+| `rg` top 1 file in full | 51,835 | 658,290 | **92.13%** | **12.70x** |
+| `rg` top 3 files in full | 51,835 | 1,590,547 | **96.74%** | **30.68x** |
+| `rg` top 5 files in full | 51,835 | 2,432,356 | **97.87%** | **46.92x** |
 
-All corpora contain 10 human-authored questions and use a 1,200-token retrieval budget, 8 context lines, and pinned immutable Git commits.
+The file-level retrieval comparison is also favorable in aggregate:
 
-| Repository | Language | Commit | Hit@1 | Hit@3 | Hit@5 | MRR | Delivered tokens | Same files in full | Reduction | Compression | Median case reduction | p95 delivered | p95 full files |
+| System | File-Hit@1 | File-Hit@3 | File-Hit@5 | File MRR |
+| --- | ---: | ---: | ---: | ---: |
+| `agent-shunt` lexical | **50%** | **76%** | **78%** | **0.611** |
+| plain `rg` ranking | 28% | 62% | 74% | 0.489 |
+
+These are separate from `agent-shunt`'s chunk-level quality metrics. Chunk-level lexical quality remains **Hit@1 50%**, **Hit@3 74%**, **Hit@5 78%**, and **MRR 0.602** under the 1,200-token budget.
+
+## 1. Same selected files in full
+
+This comparison isolates the value of focused chunk selection after file discovery has already succeeded. The baseline receives perfect file selection for free: for each question it reads only the distinct files that actually contributed chunks selected by `agent-shunt`.
+
+| Repository | Language | Commit | Chunk Hit@1 | Hit@3 | Hit@5 | Chunk MRR | Delivered tokens | Same files in full | Reduction | Compression | Median case reduction | p95 delivered | p95 full files |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | ripgrep | Rust | `3fce3b5bb023` | 40% | 80% | 90% | 0.587 | 10,066 | 406,114 | **97.5%** | **40.35x** | 97.0% | 1,200 | 117,616 |
 | Flask | Python | `d73fa1cdcbd8` | 60% | 70% | 70% | 0.633 | 11,415 | 149,620 | **92.4%** | **13.11x** | 89.1% | 1,189 | 36,171 |
-| Hono | TypeScript | `098e11912ab2` | 30% | 60% | 60% | 0.417 | 10,002 | 92,994 | **89.2%** | **9.30x** | 85.8% | 1,194 | 31,702 |
+| Hono | TypeScript | `098e11912ab2` | 30% | 60% | 60% | 0.417 | 9,973 | 86,385 | **88.5%** | **8.66x** | 85.1% | 1,190 | 31,702 |
 | Cobra | Go | `adbc8813901b` | 90% | 90% | 100% | 0.925 | 11,039 | 124,082 | **91.1%** | **11.24x** | 92.1% | 1,191 | 27,427 |
 | Gson | Java | `854c8255b625` | 30% | 70% | 70% | 0.450 | 9,342 | 139,261 | **93.3%** | **14.91x** | 92.4% | 1,189 | 36,941 |
-| **Aggregate, 50 cases** | 5 languages | pinned above | **50%** | **74%** | **78%** | **0.602** | **51,864** | **912,071** | **94.3%** | **17.59x** | n/a | n/a | n/a |
+| **Aggregate, 50 cases** | 5 languages | pinned below | **50%** | **74%** | **78%** | **0.602** | **51,835** | **905,462** | **94.28%** | **17.47x** | n/a | n/a | n/a |
 
-Average context per question was **1,037 estimated tokens** from `agent-shunt` versus **18,241 estimated tokens** for reading the same selected files in full.
+Average context per question is **1,037 estimated tokens** from `agent-shunt` versus **18,109 estimated tokens** for reading those same selected files in full.
 
-## Baseline definition
+### Baseline definition
 
 For every question:
 
@@ -41,22 +63,66 @@ This baseline intentionally does **not** measure against the entire repository. 
 
 > If another system somehow knew exactly which files `agent-shunt` selected, how much context would focused chunk retrieval still save compared with reading those files completely?
 
+## 2. Plain ripgrep + whole-file reads
+
+This baseline models a simple search-first coding workflow without claiming equivalence to any proprietary coding agent.
+
+To make the comparison conservative, plain `rg` receives the **same preprocessed query terms** generated by `agent-shunt`; it is not forced to search the raw natural-language question.
+
+For each question:
+
+1. Build an OR search from the same escaped query terms.
+2. Run plain `rg` against the same pinned checkout and corpus globs.
+3. Rank matching files by distinct query-term coverage, then matching-line count, then path for deterministic tie-breaking.
+4. Read the top 1, 3, or 5 ranked files in full through `SecureFilesystem`.
+5. Estimate context using the same numbered source representation and conservative token estimator used for `agent-shunt`.
+
+The baseline does not use `agent-shunt` filename/path boosts, IDF weighting, AST chunking, MMR, PRF, relevance pruning, or chunk budgeting.
+
+### Results by repository at top 5
+
+| Repository | agent File-Hit@5 | `rg` File-Hit@5 | agent File MRR | `rg` File MRR | agent context | `rg` top-5 full-file context | Context reduction |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ripgrep | **90%** | 40% | **0.587** | 0.289 | 10,066 | 936,411 | **98.93%** |
+| Flask | 70% | 70% | **0.650** | 0.448 | 11,415 | 592,814 | **98.07%** |
+| Hono | 60% | **90%** | 0.417 | **0.513** | 9,973 | 220,447 | **95.48%** |
+| Cobra | **100%** | 90% | **0.950** | 0.768 | 11,039 | 348,401 | **96.83%** |
+| Gson | 70% | **80%** | **0.450** | 0.427 | 9,342 | 334,283 | **97.21%** |
+| **Aggregate, 50 cases** | **78%** | 74% | **0.611** | 0.489 | **51,835** | **2,432,356** | **97.87%** |
+
+The per-repository results are intentionally not cherry-picked. Plain `rg` has higher File-Hit@5 on **Hono (90% vs 60%)** and **Gson (80% vs 70%)**. The aggregate result still favors `agent-shunt` on File-Hit@5 and MRR while using much less source context.
+
+Hono excludes `bun.lock` in the corpus globs for **both systems**. An earlier measurement allowed the large lockfile into `rg`'s top results and materially inflated its context baseline. That run was discarded and all published Hono numbers above come from the corrected rerun.
+
+### Aggregate top-N trade-off
+
+| Files opened by `rg` | `rg` File-Hit@K | `agent-shunt` File-Hit@K | `rg` whole-file context | agent context | Reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| top 1 | 28% | **50%** | 658,290 | 51,835 | **92.13%** |
+| top 3 | 62% | **76%** | 1,590,547 | 51,835 | **96.74%** |
+| top 5 | 74% | **78%** | 2,432,356 | 51,835 | **97.87%** |
+
+This table exposes the actual trade-off rather than treating context reduction alone as success. Opening more `rg` files improves file discovery, but increases source context substantially.
+
 ## Token measurement
 
-These are **estimated context tokens**, not provider billing tokens. Both sides use the same conservative estimator used by the production retrieval budget, including the same numbered source representation and per-item envelope. The benchmark independently re-estimates returned chunks and fails if the value differs from production `estimatedTokens`.
+These are **estimated context tokens**, not provider billing tokens. All context comparisons use the same conservative estimator used by the production retrieval budget, including the same numbered source representation and per-item envelope.
 
-Because the same estimator is used for both sides, the reduction and compression ratios are the primary comparison metrics. Provider-specific tokenizers can produce different absolute token counts.
+The benchmark independently re-estimates returned `agent-shunt` chunks and fails if the value differs from production `estimatedTokens`. Provider-specific tokenizers can produce different absolute counts, so reduction and compression ratios are the more robust comparison metrics.
 
 ## Quality measurement
 
-- **Hit@K** is the fraction of questions where at least one acceptable human-authored ground-truth target appears within the first K returned chunks.
-- **MRR** is the mean reciprocal rank of the first acceptable target.
+- **Chunk Hit@K** is the fraction of questions where at least one acceptable human-authored ground-truth target appears within the first K returned chunks.
+- **File Hit@K** is the equivalent metric over distinct ranked files.
+- **MRR** is the mean reciprocal rank of the first acceptable target in the corresponding ranking.
 - These metrics measure retrieval quality, not whether an LLM would produce a correct final answer.
-- Each repository contributes the same number of questions, so aggregate Hit@K and MRR are the simple 50-case aggregate.
+- Each repository contributes exactly 10 questions, so the five-repository aggregate is the 50-case aggregate.
 
-The savings result should always be published together with quality. A system that returned almost no context would have excellent compression but poor retrieval usefulness.
+The savings figures should always be published together with quality. A system that returned almost no context would have excellent compression but poor retrieval usefulness.
 
 ## Pinned corpora
+
+All corpora contain 10 human-authored questions and use a 1,200-token retrieval budget, 8 context lines, and pinned immutable Git commits.
 
 | Corpus | Repository | Full commit |
 | --- | --- | --- |
@@ -68,7 +134,7 @@ The savings result should always be published together with quality. A system th
 
 ## Reproduce
 
-Clone one of the repositories at its pinned commit, then run:
+Clone one of the repositories at its pinned commit. For the conservative same-file comparison:
 
 ```bash
 cargo run --release --example context_savings_eval -- \
@@ -76,12 +142,22 @@ cargo run --release --example context_savings_eval -- \
   --root /path/to/pinned/repository
 ```
 
-The external evaluation workflow runs this comparison for all five pinned repositories.
+For the `rg + whole-file reads` comparison:
+
+```bash
+cargo run --release --example rg_baseline_eval -- \
+  eval/external/<corpus>.json \
+  --root /path/to/pinned/repository
+```
+
+The external evaluation and ripgrep-baseline GitHub Actions workflows run these measurements against all five pinned repositories.
 
 ## Publication-safe wording
 
-A concise claim supported by this benchmark is:
+Two concise claims supported by the current benchmark are:
 
-> In a reproducible 50-question benchmark across five pinned open-source repositories and five languages, agent-shunt reduced estimated source context by 94.3% compared with reading the exact same selected files in full, while lexical retrieval reached 78% Hit@5 under a 1,200-token budget.
+> In a reproducible 50-question benchmark across five pinned open-source repositories and five languages, agent-shunt reduced estimated source context by **94.28%** compared with reading the exact same selected files in full, while lexical retrieval reached **78% Chunk-Hit@5** under a 1,200-token budget.
 
-Do not rewrite this as "94.3% lower LLM cost", "94.3% fewer billed tokens", or "94.3% better than coding agents". Those claims were not measured by this benchmark.
+> Against a disclosed plain-ripgrep baseline that searches the same preprocessed query terms and reads its top five matching files in full, agent-shunt used **97.87% less estimated source context** while achieving **78% vs 74% File-Hit@5** and **0.611 vs 0.489 file MRR** across the same 50 questions.
+
+Do not rewrite these as "94%/98% lower LLM cost", "fewer billed tokens", or "better than coding agents". Those claims were not measured by these benchmarks.
