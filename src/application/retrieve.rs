@@ -12,7 +12,7 @@ use crate::{
     },
     domain::{
         DenseHit, Document, FileChange, Limits, LineRange, RetrieveResult, RetrievedChunk,
-        ScanResult,
+        ScanResult, SearchHit,
     },
 };
 
@@ -235,29 +235,41 @@ pub fn execute_with_resolver(
     } else {
         search_question
     };
-    // Optional pseudo-relevance feedback: a first lexical pass surfaces the
-    // files that best match, and the distinctive identifiers concentrated there
-    // are folded back into the search so the origin symbol the question never
-    // named (a helper, a field) is recovered on the real pass. Local-only: it
-    // reuses ripgrep and a bounded read of the leader files, no provider.
-    let search_question = if input.prf {
-        let mined = prf_terms(search, loader, input, &search_question, &globs)?;
+    // Optional pseudo-relevance feedback is deliberately recall-only. Keep
+    // the caller's lexical hits and their score magnitudes untouched, mine a few
+    // identifiers from those leaders, then use the expanded pass only as a source
+    // of extra files. This prevents query drift from reranking evidence already
+    // found by the caller's own words. Local-only: no provider.
+    let (search_question, mut hits, mut prf_recall_hits) = if input.prf {
+        let lexical_hits = search.search(&input.cwd, &search_question, input.max_hits, &globs)?;
+        let mined = prf_terms(search, loader, input, &search_question, &lexical_hits)?;
         if mined.is_empty() {
-            search_question
+            (search_question, lexical_hits, Vec::new())
         } else {
-            format!("{search_question} {}", mined.join(" "))
+            let expanded_question = format!("{search_question} {}", mined.join(" "));
+            let expanded_hits =
+                search.search(&input.cwd, &expanded_question, input.max_hits, &globs)?;
+            (expanded_question, lexical_hits, expanded_hits)
         }
     } else {
-        search_question
+        let hits = search.search(&input.cwd, &search_question, input.max_hits, &globs)?;
+        (search_question, hits, Vec::new())
     };
     let terms = search.terms(&search_question);
     if terms.is_empty() {
         bail!("question contains no searchable terms");
     }
-    let mut hits = search.search(&input.cwd, &search_question, input.max_hits, &globs)?;
     if let Some(changes) = &scope {
         hits.retain(|hit| changes.iter().any(|change| change.path == hit.path));
+        prf_recall_hits.retain(|hit| changes.iter().any(|change| change.path == hit.path));
         for hit in &mut hits {
+            if let Some(change) = changes.iter().find(|change| change.path == hit.path)
+                && hit_in_changed_lines(hit, change)
+            {
+                hit.score = hit.score.saturating_mul(SCOPE_HUNK_BOOST);
+            }
+        }
+        for hit in &mut prf_recall_hits {
             if let Some(change) = changes.iter().find(|change| change.path == hit.path)
                 && hit_in_changed_lines(hit, change)
             {
@@ -282,6 +294,11 @@ pub fn execute_with_resolver(
                 .map(|change| change.path.as_str())
                 .collect::<std::collections::HashSet<_>>();
             for hit in &mut hits {
+                if untracked.contains(hit.path.as_str()) {
+                    hit.score = hit.score.saturating_mul(UNTRACKED_FILE_BOOST);
+                }
+            }
+            for hit in &mut prf_recall_hits {
                 if untracked.contains(hit.path.as_str()) {
                     hit.score = hit.score.saturating_mul(UNTRACKED_FILE_BOOST);
                 }
@@ -327,6 +344,45 @@ pub fn execute_with_resolver(
         ranked_files.truncate(cliff.max(MIN_CLIFF_FILES));
     }
     ranked_files.truncate(input.limits.max_files);
+
+    // PRF may add a tiny number of files that the lexical selection omitted, but
+    // it never changes the selected lexical files or their scores. Extra hits are
+    // assigned exactly the existing relevance floor, making them eligible for
+    // MMR when they add genuinely new evidence without letting feedback terms
+    // outrank evidence supported by the original question. The lexical cliff is
+    // applied before this augmentation, so query drift cannot reopen its tail.
+    if !prf_recall_hits.is_empty() && ranked_files.len() < input.limits.max_files {
+        let selected_paths = ranked_files
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<HashSet<_>>();
+        let remaining_slots = input.limits.max_files - ranked_files.len();
+        let extras = prf_extra_files(
+            &prf_recall_hits,
+            &selected_paths,
+            remaining_slots.min(PRF_EXTRA_FILES),
+        );
+        let recall_score = top
+            .saturating_mul(input.min_score_percent)
+            .div_ceil(100)
+            .max(1);
+        for (path, extra_hits) in extras {
+            let mut extra_coverage = 0u16;
+            let ranges = extra_hits
+                .into_iter()
+                .map(|hit| {
+                    extra_coverage |= hit.matched_terms;
+                    (hit.line, recall_score)
+                })
+                .collect::<Vec<_>>();
+            // Replace any weak lexical-tail hits for this omitted path. Its PRF
+            // admission is intentionally bounded at the relevance floor.
+            grouped.insert(path.clone(), ranges);
+            *coverage.entry(path.clone()).or_default() |= extra_coverage;
+            ranked_files.push((path, recall_score));
+        }
+    }
+
     let paths = ranked_files
         .iter()
         .map(|(path, _)| PathBuf::from(path))
@@ -609,6 +665,10 @@ const PRF_TOP_DOCS: usize = 3;
 /// pass stays anchored to the caller's intent rather than the leader files'
 /// whole vocabulary.
 const PRF_TERMS: usize = 5;
+/// Most files PRF may add beyond the lexical file selection. Feedback is a
+/// recall side-channel, not a second ranking authority: keeping this tiny stops
+/// one mined identifier from reopening the whole tail the lexical cliff cut.
+const PRF_EXTRA_FILES: usize = 2;
 
 /// Pseudo-relevance feedback terms: run a first lexical pass, take the leader
 /// files, and return the distinctive compound identifiers concentrated there
@@ -620,14 +680,13 @@ fn prf_terms(
     loader: &dyn DocumentLoader,
     input: &RetrieveInput,
     question: &str,
-    globs: &[String],
+    hits: &[SearchHit],
 ) -> anyhow::Result<Vec<String>> {
-    let hits = search.search(&input.cwd, question, input.max_hits, globs)?;
     if hits.is_empty() {
         return Ok(Vec::new());
     }
     let mut best: BTreeMap<String, usize> = BTreeMap::new();
-    for hit in &hits {
+    for hit in hits {
         let entry = best.entry(hit.path.clone()).or_default();
         *entry = (*entry).max(hit.score);
     }
@@ -689,6 +748,38 @@ fn prf_terms(
         .take(PRF_TERMS)
         .map(|(token, _)| token)
         .collect())
+}
+
+/// Highest-ranked PRF files not already selected by lexical retrieval. The
+/// expanded pass is used only to nominate paths; its raw score never replaces a
+/// lexical score because the IDF scale changes when feedback terms are appended.
+fn prf_extra_files<'a>(
+    expanded: &'a [SearchHit],
+    selected_paths: &HashSet<String>,
+    limit: usize,
+) -> Vec<(String, Vec<&'a SearchHit>)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut by_path: BTreeMap<String, Vec<&SearchHit>> = BTreeMap::new();
+    for hit in expanded {
+        if !selected_paths.contains(&hit.path) {
+            by_path.entry(hit.path.clone()).or_default().push(hit);
+        }
+    }
+    let mut ranked = by_path
+        .into_iter()
+        .map(|(path, hits)| {
+            let score = hits.iter().map(|hit| hit.score).max().unwrap_or(0);
+            (path, score, hits)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(path, _, hits)| (path, hits))
+        .collect()
 }
 
 /// Compound-identifier tokens in `text`: maximal runs of identifier characters,
@@ -1045,7 +1136,7 @@ mod tests {
     use super::{
         ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, decode_terms,
         estimate_tokens, execute, fuse_dense, identifier_tokens, is_compound_identifier,
-        reciprocal_rank_fusion,
+        prf_extra_files, reciprocal_rank_fusion,
     };
 
     #[test]
@@ -1075,6 +1166,30 @@ mod tests {
         // bits 0 and 2 set -> alpha and gamma, in term order.
         assert_eq!(decode_terms(0b101, &terms), vec!["alpha", "gamma"]);
         assert_eq!(decode_terms(0, &terms), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prf_recall_only_nominates_new_files_without_reordering_selected_paths() {
+        let hit = |path: &str, score: usize| SearchHit {
+            path: path.to_owned(),
+            line: 1,
+            score,
+            matched_terms: 1,
+        };
+        let expanded = vec![
+            hit("already.rs", 1000),
+            hit("new-a.rs", 900),
+            hit("new-b.rs", 800),
+            hit("new-c.rs", 700),
+        ];
+        let selected = std::collections::HashSet::from(["already.rs".to_owned()]);
+        let extras = prf_extra_files(&expanded, &selected, 2);
+        let paths = extras
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["new-a.rs", "new-b.rs"]);
     }
 
     #[test]
