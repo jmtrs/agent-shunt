@@ -119,6 +119,19 @@ struct CaseResult {
     delivered_tokens: usize,
     chunks: usize,
     latency_ms: f64,
+    query_terms: Vec<String>,
+    ranked_chunks: Vec<ChunkDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChunkDiagnostic {
+    rank: usize,
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    score: usize,
+    estimated_tokens: usize,
 }
 
 fn main() -> Result<ExitCode> {
@@ -326,12 +339,28 @@ fn run_strategy(root: &Path, corpus: &Corpus, strategy: Strategy) -> Result<Stra
         )
         .with_context(|| format!("{} failed case {}", strategy.name(), case.id))?;
         let elapsed = started.elapsed();
+        let first_relevant_rank = first_relevant_rank(&result.chunks, &case.expected);
+        let ranked_chunks = result
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| ChunkDiagnostic {
+                rank: index + 1,
+                path: chunk.path.clone(),
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                score: chunk.score,
+                estimated_tokens: chunk.estimated_tokens,
+            })
+            .collect();
         results.push(CaseResult {
             id: case.id.clone(),
-            first_relevant_rank: first_relevant_rank(&result.chunks, &case.expected),
+            first_relevant_rank,
             delivered_tokens: result.estimated_tokens,
             chunks: result.chunks.len(),
             latency_ms: duration_ms(elapsed),
+            query_terms: result.query_terms.clone(),
+            ranked_chunks,
         });
     }
 
