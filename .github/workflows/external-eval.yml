@@ -6,6 +6,11 @@ on:
     paths:
       - "eval/external/**"
       - "examples/retrieval_eval.rs"
+      - "src/application/retrieve.rs"
+      - "src/application/resolver.rs"
+      - "src/application/ports.rs"
+      - "src/adapters/ripgrep.rs"
+      - "src/adapters/tree_sitter_chunker.rs"
       - ".github/workflows/external-eval.yml"
 
 permissions:
