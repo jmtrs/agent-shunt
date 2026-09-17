@@ -1,0 +1,82 @@
+name: Ripgrep whole-file baseline
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "eval/external/**"
+      - "examples/rg_baseline_eval.rs"
+      - "src/application/retrieve.rs"
+      - "src/application/resolver.rs"
+      - "src/application/ports.rs"
+      - "src/adapters/ripgrep.rs"
+      - "src/adapters/filesystem.rs"
+      - ".github/workflows/rg-baseline.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ripgrep
+            corpus: ripgrep
+            repository: https://github.com/BurntSushi/ripgrep.git
+            commit: 3fce3b5bb0236da2df6d99672afb8a719642eca7
+          - name: flask
+            corpus: flask
+            repository: https://github.com/pallets/flask.git
+            commit: d73fa1cdcbd8b1465c151db8924ba58b1dd14e35
+          - name: hono
+            corpus: hono
+            repository: https://github.com/honojs/hono.git
+            commit: 098e11912ab244c5c33931de007f04dc8e3c2929
+          - name: cobra
+            corpus: cobra
+            repository: https://github.com/spf13/cobra.git
+            commit: adbc8813901bba65827259daa8e22ff94ec1f30e
+          - name: gson
+            corpus: gson
+            repository: https://github.com/google/gson.git
+            commit: 854c8255b625cf1e13c701a83ea9ccb4caaa576a
+
+    steps:
+      - name: Checkout agent-shunt
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Checkout pinned corpus target
+        env:
+          TARGET_REPOSITORY: ${{ matrix.repository }}
+          TARGET_COMMIT: ${{ matrix.commit }}
+          TARGET_DIR: ${{ runner.temp }}/${{ matrix.name }}
+        run: |
+          git clone --filter=blob:none "$TARGET_REPOSITORY" "$TARGET_DIR"
+          git -C "$TARGET_DIR" checkout --detach "$TARGET_COMMIT"
+          test "$(git -C "$TARGET_DIR" rev-parse HEAD)" = "$TARGET_COMMIT"
+
+      - name: Compare agent-shunt with ripgrep whole-file workflow
+        run: >-
+          cargo run --release --example rg_baseline_eval --
+          eval/external/${{ matrix.corpus }}.json
+          --root "${{ runner.temp }}/${{ matrix.name }}"
+
+      - name: Print machine-readable baseline
+        run: >-
+          cargo run --release --example rg_baseline_eval --
+          eval/external/${{ matrix.corpus }}.json
+          --root "${{ runner.temp }}/${{ matrix.name }}"
+          --json
