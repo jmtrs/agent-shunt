@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -11,8 +10,7 @@ use agent_shunt::{
     application::{
         ports::DocumentLoader,
         retrieve::{
-            MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput,
-            execute_with_resolver,
+            MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, execute_with_resolver,
         },
     },
     domain::{Limits, RetrievedChunk},
@@ -97,10 +95,7 @@ struct CaseResult {
 
 fn main() -> Result<ExitCode> {
     let mut args = env::args().skip(1);
-    let corpus_path = PathBuf::from(
-        args.next()
-            .unwrap_or_else(|| "eval/corpus.json".to_owned()),
-    );
+    let corpus_path = PathBuf::from(args.next().unwrap_or_else(|| "eval/corpus.json".to_owned()));
     let mut root = env::current_dir().context("cannot resolve current directory")?;
     let mut json = false;
     while let Some(arg) = args.next() {
@@ -117,7 +112,11 @@ fn main() -> Result<ExitCode> {
         .with_context(|| format!("cannot read corpus {}", corpus_path.display()))?;
     let corpus: Corpus = serde_json::from_str(&raw)
         .with_context(|| format!("invalid corpus {}", corpus_path.display()))?;
-    ensure!(corpus.version == 1, "unsupported corpus version {}", corpus.version);
+    ensure!(
+        corpus.version == 1,
+        "unsupported corpus version {}",
+        corpus.version
+    );
     ensure!(!corpus.cases.is_empty(), "corpus contains no cases");
 
     let root = fs::canonicalize(&root)
@@ -252,8 +251,14 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
     reductions.sort_by(f64::total_cmp);
     let median_case_reduction_pct = median(&reductions);
 
-    let mut delivered_values = results.iter().map(|r| r.delivered_tokens).collect::<Vec<_>>();
-    let mut whole_values = results.iter().map(|r| r.whole_file_tokens).collect::<Vec<_>>();
+    let mut delivered_values = results
+        .iter()
+        .map(|r| r.delivered_tokens)
+        .collect::<Vec<_>>();
+    let mut whole_values = results
+        .iter()
+        .map(|r| r.whole_file_tokens)
+        .collect::<Vec<_>>();
     delivered_values.sort_unstable();
     whole_values.sort_unstable();
 
@@ -394,7 +399,11 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
 fn print_human(report: &Report, repository: Option<&RepositorySpec>) {
     println!("corpus: {} ({} cases)", report.corpus, report.cases);
     if let Some(repository) = repository {
-        println!("repository: {} @ {}", repository.url, &repository.commit[..12]);
+        println!(
+            "repository: {} @ {}",
+            repository.url,
+            &repository.commit[..12]
+        );
     }
     println!(
         "quality: hit@1={:.3} hit@3={:.3} hit@5={:.3} MRR={:.3}",
