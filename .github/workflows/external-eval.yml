@@ -38,3 +38,10 @@ jobs:
           cargo run --release --example retrieval_eval --
           eval/external/ripgrep.json
           --root "$RUNNER_TEMP/ripgrep"
+
+      - name: Print per-case diagnostics
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/ripgrep.json
+          --root "$RUNNER_TEMP/ripgrep"
+          --json
