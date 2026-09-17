@@ -572,7 +572,7 @@ fn split_words(term: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     for (index, &character) in chars.iter().enumerate() {
-        if matches!(character, '_' | '-' | '.' | ':', '/') {
+        if matches!(character, '_' | '-' | '.' | ':' | '/') {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
