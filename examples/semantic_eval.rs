@@ -122,6 +122,21 @@ fn main() -> Result<ExitCode> {
     );
 
     let lexical = run_strategy(&root, &corpus, &resolver, None, "lexical")?;
+
+    // Dense recall lazily builds and persists the repository index. Measure that
+    // one-time cold-start separately so semantic query latency below reflects a
+    // warmed index, which is the steady-state production path after first use.
+    let cold_start = Instant::now();
+    index
+        .recall(
+            &corpus.cases[0].question,
+            &root,
+            &corpus.globs,
+            &Limits::default(),
+        )
+        .context("semantic cold-start failed")?;
+    let semantic_cold_start_ms = duration_ms(cold_start.elapsed());
+
     let semantic = run_strategy(
         &root,
         &corpus,
@@ -139,6 +154,7 @@ fn main() -> Result<ExitCode> {
                 "repository": corpus.repository,
                 "embeddingModel": MODEL,
                 "indexTopK": INDEX_TOP_K,
+                "semanticColdStartMs": semantic_cold_start_ms,
                 "reports": [lexical, semantic],
             }))?
         );
@@ -150,6 +166,9 @@ fn main() -> Result<ExitCode> {
             &corpus.repository.commit[..12]
         );
         println!("semantic model: {MODEL}; dense top-k: {INDEX_TOP_K}");
+        println!(
+            "semantic cold-start: {semantic_cold_start_ms:.1} ms (index build + first dense recall)"
+        );
         print_report(&corpus, &lexical);
         print_report(&corpus, &semantic);
     }
