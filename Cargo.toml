@@ -13,6 +13,11 @@ categories = ["command-line-utilities", "development-tools"]
 name = "agent-shunt"
 path = "src/main.rs"
 
+[[example]]
+name = "semantic_eval"
+path = "examples/semantic_eval.rs"
+required-features = ["local-embed"]
+
 [features]
 default = ["ast"]
 # Structure-aware AST chunking via tree-sitter. On by default; disable for a
