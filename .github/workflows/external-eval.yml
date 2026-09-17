@@ -45,3 +45,37 @@ jobs:
           eval/external/ripgrep.json
           --root "$RUNNER_TEMP/ripgrep"
           --json
+
+  flask:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-shunt
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Checkout pinned Flask corpus target
+        run: |
+          git clone --filter=blob:none https://github.com/pallets/flask.git "$RUNNER_TEMP/flask"
+          git -C "$RUNNER_TEMP/flask" checkout --detach d73fa1cdcbd8b1465c151db8924ba58b1dd14e35
+          test "$(git -C "$RUNNER_TEMP/flask" rev-parse HEAD)" = "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35"
+
+      - name: Run Flask retrieval corpus
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/flask.json
+          --root "$RUNNER_TEMP/flask"
+
+      - name: Print per-case diagnostics
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/flask.json
+          --root "$RUNNER_TEMP/flask"
+          --json
