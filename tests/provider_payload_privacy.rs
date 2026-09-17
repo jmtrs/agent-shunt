@@ -81,10 +81,7 @@ fn worker_payload_contains_selected_chunks_not_full_document_lines() {
         },
         review: false,
     };
-    let worker = OpenAiCompatibleWorker::new(
-        &format!("http://127.0.0.1:{port}/v1"),
-        "json_object",
-    );
+    let worker = OpenAiCompatibleWorker::new(&format!("http://127.0.0.1:{port}/v1"), "json_object");
 
     worker.analyze(&request, "").expect("worker request");
     let wire_request = server.join().expect("stub server");
