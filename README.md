@@ -5,7 +5,7 @@
 
 Stop dumping whole files into your agent's context.
 
-Coding agents burn their context window reading files wholesale and exploring blindly. agent-shunt gives them just the relevant pieces — found locally, for free — and can optionally get a model to synthesize an answer where every claim is checked against the source that was actually sent.
+Coding agents burn their context window reading files wholesale and exploring blindly. agent-shunt gives them just the relevant pieces — found locally, for free — and can optionally get a model to synthesize an answer whose structured findings are checked against the source references that were actually sent.
 
 Inspired by [Spotify's Portal "shunt" plugin](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90), which showed how much token spend is just bulk reads — with two twists: retrieval here is local and free, and the worker's file/line references are validated locally instead of trusted.
 
@@ -19,7 +19,7 @@ That's the core command. No API key, no network, nothing leaves your machine: it
 
 **Local and free.** `retrieve` searches your code and returns ranked, line-numbered chunks within a strict token budget. A chunk that doesn't fit is not included — the budget is real. Chunks snap to their enclosing block instead of a fixed line window, near-duplicate and padding lines are dropped, and no single file is allowed to flood the budget — so the evidence stays dense and on-target.
 
-**With a model, optional.** Add `--analyze` (or use `scan` for files you pick explicitly) and the selected evidence goes to a model for synthesis. The model's answer is accepted only if every file and line range it cites was actually part of the evidence sent. Hallucinated references are rejected locally, not trusted.
+**With a model, optional.** Add `--analyze` (or use `scan` for files you pick explicitly) and the selected evidence goes to a model for synthesis. Each structured finding is accepted only when its file and line range are inside the evidence sent; findings with unknown or out-of-context references are dropped locally. The finding summary itself is still model output, so source-reference validation is not a proof that every semantic claim is true.
 
 If every model in the chain fails, the command returns `host fallback required` instead of guessing — the calling agent just resumes its normal targeted reads.
 
@@ -70,7 +70,7 @@ Or persistent, using the provider's own variable name:
 }
 ```
 
-Model IDs follow your provider's naming. Local endpoints run keyless automatically. Set `responseFormat: "json_object"` if the provider lacks JSON-schema structured-output support — claim validation is local either way, so the no-hallucination guarantee doesn't depend on it.
+Model IDs follow your provider's naming. Local endpoints run keyless automatically. Set `responseFormat: "json_object"` if the provider lacks JSON-schema structured-output support — source-reference validation is local either way, so cited paths and line ranges are checked independently of provider-side schema enforcement.
 
 ## Commands
 
@@ -151,6 +151,7 @@ Chunks snap to their enclosing definition — the function, method, or class wit
 - **Read-only.** Never writes to your repository.
 - **`retrieve` is fully local by default**: no network, no API key. `--analyze`, `scan`, and the opt-in `--semantic` pass are the only paths that reach a provider.
 - **The model sees only the selected chunks**, never your whole repo. `--semantic` sends candidate chunks to your embeddings endpoint and `--rerank` sends the top candidates to the worker model, each under its data policy; the default retrieval never leaves your machine.
+- **Model output remains untrusted.** Structured findings are source-reference validated: their path and line range must fall inside evidence that was actually supplied. This catches invented or out-of-context references; it does not prove that a model-written summary is semantically correct.
 - **On OpenRouter**, every request — worker and embeddings alike — enforces Zero Data Retention routing and blocks data-collecting and `:free` routes. On any other provider, their data policy is between you and them.
 - **Credentials never travel in cleartext**: plain `http` endpoints are limited to localhost and private networks. Redirects and environment proxies are ignored.
 - **Your key stays local**: read at runtime, never printed, logged, or written to metrics. Metrics are aggregates only (status, model, timing, tokens, cost) — never questions, code, or answers.
@@ -182,7 +183,7 @@ Optional `~/.config/agent-shunt/config.json`:
 - `baseUrl` — any http(s) origin; env override `AGENT_SHUNT_BASE_URL`.
 - Keys resolve in order: `apiKey` value → `AGENT_SHUNT_API_KEY` → `OPENROUTER_API_KEY` → the `apiKeyEnv` variable → env files.
 - `model` / `fallbackModels` — your provider's IDs. Transport, HTTP, and validation failures advance through the chain under one overall timeout.
-- `responseFormat` — `json_schema` (strict, when the provider supports it) or `json_object`. Output parsing is lenient in either mode: unknown keys are ignored, missing fields default, and a scalar where a list is expected is coerced — so loosely-conforming `json_object` providers still work, while claim validation stays local.
+- `responseFormat` — `json_schema` (strict, when the provider supports it) or `json_object`. Output parsing is lenient in either mode: unknown keys are ignored, missing fields default, and a scalar where a list is expected is coerced — so loosely-conforming `json_object` providers still work, while source-reference validation stays local.
 - `disableReasoning` — set `true` for reasoning models so they answer directly (this tool does grounded extraction, not deliberation). Auto-injects the provider's disable-thinking parameter: z.ai `thinking:{type:disabled}`, Qwen/DashScope `enable_thinking:false`, otherwise OpenRouter-style `reasoning:{enabled:false}`.
 - `extraBody` — a JSON object merged into every request body, applied last so it overrides any tool default (including the reasoning field above). The escape hatch for any provider parameter the built-ins don't cover.
 - `embeddingModel` — enables `--semantic`. Point `embeddingBaseUrl` at a provider that serves `/embeddings` (OpenAI, or a local Ollama/LM Studio) — **OpenRouter does not**, so `embeddingBaseUrl` usually differs from `baseUrl` even though it defaults to it. The key resolves like the worker's, or via `embeddingApiKeyEnv`. A local endpoint (Ollama `nomic-embed-text`) keeps `--semantic` keyless and on-machine.
