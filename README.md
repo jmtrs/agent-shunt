@@ -15,6 +15,21 @@ agent-shunt retrieve --question "Where is authentication enforced?" --dir .
 
 That's the core command. No API key, no network, nothing leaves your machine: it finds and ranks the relevant chunks of your codebase and returns them with line numbers, inside a token budget you choose.
 
+## Benchmarks
+
+A reproducible external benchmark uses **50 human-authored architecture and implementation questions** across five pinned open-source repositories in Rust, Python, TypeScript, Go, and Java, with a 1,200-token retrieval budget.
+
+| Comparison | agent-shunt | Baseline | Context reduction |
+| --- | ---: | ---: | ---: |
+| Same selected files, read in full | 51,835 | 905,462 | **94.28% (17.47x)** |
+| Plain `rg` + top-1 file in full | 51,835 | 658,290 | **92.13% (12.70x)** |
+| Plain `rg` + top-3 files in full | 51,835 | 1,590,547 | **96.74% (30.68x)** |
+| Plain `rg` + top-5 files in full | 51,835 | 2,432,356 | **97.87% (46.92x)** |
+
+At file level, agent-shunt reached **78% File-Hit@5 and 0.611 MRR**, versus **74% File-Hit@5 and 0.489 MRR** for the disclosed `rg + whole-file reads` baseline. The comparison is not cherry-picked: the published per-repository table also shows the corpora where plain `rg` wins a metric.
+
+These are **estimated source-context tokens**, not provider billing tokens or measured API cost. Repositories, commits, evaluator code, CI runs, caveats, and the machine-readable snapshot are public in [`eval/RESULTS.md`](eval/RESULTS.md) and [`eval/results/2026-09-17.json`](eval/results/2026-09-17.json).
+
 ## Two paths
 
 **Local and free.** `retrieve` searches your code and returns ranked, line-numbered chunks within a strict token budget. A chunk that doesn't fit is not included — the budget is real. Chunks snap to their enclosing block instead of a fixed line window, near-duplicate and padding lines are dropped, and no single file is allowed to flood the budget — so the evidence stays dense and on-target.
