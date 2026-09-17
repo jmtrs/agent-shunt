@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "name": "zod-v1",
+  "repository": {
+    "url": "https://github.com/colinhacks/zod",
+    "commit": "59bbc03e10c636b9eb3c393dfeb552819774ec21"
+  },
+  "budgetTokens": 1200,
+  "contextLines": 8,
+  "maxHits": 40,
+  "globs": [
+    "!**/tests/**",
+    "!**/*.test.ts",
+    "!packages/docs/**",
+    "!packages/docs-v3/**",
+    "!examples/**"
+  ],
+  "ks": [1, 3, 5],
+  "strategies": ["lexical", "prf"],
+  "cases": [
+    {
+      "id": "sync-async-parse-errors",
+      "question": "How do synchronous and asynchronous parsing run a schema, reject an unexpected Promise in sync mode, finalize issues, and lazily construct safe-parse errors only when the error property is read?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/parse.ts" }
+      ]
+    },
+    {
+      "id": "validation-issue-model",
+      "question": "Where are validation issue variants represented for invalid types, size bounds, string formats, unions, keys, elements, and custom issues?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/errors.ts" }
+      ]
+    },
+    {
+      "id": "registry-metadata-inheritance",
+      "question": "How does a schema metadata registry store entries weakly, maintain IDs, inherit metadata from parent schemas without inheriting IDs, and expose a global registry shared across CommonJS and ESM?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/registries.ts" }
+      ]
+    },
+    {
+      "id": "standard-schema-contract",
+      "question": "How is the Standard Schema contract modeled for typed input/output inference, validation success or failure issues, and input/output JSON Schema conversion targets?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/standard-schema.ts" }
+      ]
+    },
+    {
+      "id": "json-schema-conversion",
+      "question": "How does Zod convert schemas to JSON Schema while applying metadata, handling references and cycles, choosing input or output mode, and emitting definitions or external references?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/to-json-schema.ts" }
+      ]
+    },
+    {
+      "id": "runtime-checks",
+      "question": "Where are reusable runtime checks implemented for numeric bounds, lengths, string formats, regexes, equality and other refinements that append structured validation issues?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/checks.ts" }
+      ]
+    },
+    {
+      "id": "compiled-validation-fast-path",
+      "question": "How does the experimental compiler build optimized validation code, represent invalid and fallback sentinels, and preserve runtime fallback behavior when user callbacks or unsupported constructs prevent a safe fast path?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/compile.ts" }
+      ]
+    },
+    {
+      "id": "schema-graph-visitor",
+      "question": "How is a schema graph traversed recursively while tracking already visited schemas so recursive and shared schema structures can be visited without infinite loops?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/visit.ts" }
+      ]
+    },
+    {
+      "id": "format-regex-factories",
+      "question": "Where are the regular expressions and regex factories defined for built-in string formats such as email, UUID, IP addresses, base64, JWT, ISO date/time and related identifiers?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/regexes.ts" }
+      ]
+    },
+    {
+      "id": "core-schema-execution",
+      "question": "How do core schema implementations execute object, union, intersection, tuple, record, map, set, transform, optional and lazy schemas while accumulating parse payload issues?",
+      "expected": [
+        { "path": "packages/zod/src/v4/core/schemas.ts" }
+      ]
+    }
+  ]
+}
