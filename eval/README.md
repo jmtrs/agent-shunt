@@ -82,6 +82,47 @@ or a specific source range:
 
 A retrieved chunk satisfies a ranged target when their line spans overlap.
 
+## Context savings benchmark
+
+`context_savings_eval` measures how much context the lexical pipeline avoids
+sending after it has already found the relevant files:
+
+```bash
+cargo run --release --example context_savings_eval -- \
+  eval/external/example.json \
+  --root /path/to/external/repository
+```
+
+Use `--json` for machine-readable output.
+
+The primary baseline is intentionally conservative: for each question, take the
+**exact distinct files that contributed the chunks selected by `agent-shunt`**
+and compare the delivered chunks with sending those same files in full. It does
+not compare against the whole repository and it does not add files that retrieval
+never selected. This isolates the context reduction produced by focused chunking
+once file discovery has already succeeded.
+
+Both sides use the same conservative token estimator and the same numbered source
+format. The benchmark independently re-estimates the selected chunks and fails
+if that value differs from production `estimatedTokens`, preventing silent metric
+drift. The whole-file side reloads the selected files through `SecureFilesystem`,
+so it uses the same UTF-8, binary, size, path-safety and line-normalization rules
+as production retrieval.
+
+Reported savings metrics are:
+
+- **context reduction %**: `1 - delivered tokens / whole-selected-file tokens`,
+  computed from aggregate token totals. This is the primary publishable figure.
+- **compression ratio**: whole-selected-file tokens divided by delivered tokens.
+- **median case reduction %**: median reduction across individual questions, so
+  a few unusually large source files cannot hide typical-case behaviour.
+- **p95 delivered / whole-file tokens**: tail context size for both sides.
+
+These are estimator-based context measurements, not provider billing-token
+claims and not measurements of a proprietary coding agent. Public results should
+always name the corpus version, pinned repository commits, token budget, quality
+metrics and baseline definition alongside the savings number.
+
 ## Gates
 
 `gates` makes quality regressions executable instead of descriptive. Each
