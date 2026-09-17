@@ -41,3 +41,6 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Retrieval quality gate
+        run: cargo run --quiet --example retrieval_eval -- eval/corpus.json
