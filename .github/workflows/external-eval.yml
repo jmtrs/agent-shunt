@@ -84,3 +84,37 @@ jobs:
           eval/external/flask.json
           --root "$RUNNER_TEMP/flask"
           --json
+
+  zod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-shunt
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Checkout pinned Zod corpus target
+        run: |
+          git clone --filter=blob:none https://github.com/colinhacks/zod.git "$RUNNER_TEMP/zod"
+          git -C "$RUNNER_TEMP/zod" checkout --detach 59bbc03e10c636b9eb3c393dfeb552819774ec21
+          test "$(git -C "$RUNNER_TEMP/zod" rev-parse HEAD)" = "59bbc03e10c636b9eb3c393dfeb552819774ec21"
+
+      - name: Run Zod retrieval corpus
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/zod.json
+          --root "$RUNNER_TEMP/zod"
+
+      - name: Print per-case diagnostics
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/zod.json
+          --root "$RUNNER_TEMP/zod"
+          --json
