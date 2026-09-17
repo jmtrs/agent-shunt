@@ -5,7 +5,7 @@ It does not call an LLM or an embeddings provider. The first corpus compares the
 local lexical pipeline with lexical retrieval plus pseudo-relevance feedback
 (`--prf`).
 
-Run it from the repository root:
+Run the self-retrieval corpus from the repository root:
 
 ```bash
 cargo run --release --example retrieval_eval -- eval/corpus.json
@@ -16,6 +16,39 @@ Machine-readable output:
 ```bash
 cargo run --release --example retrieval_eval -- eval/corpus.json --json
 ```
+
+## External repositories
+
+The evaluator can also run against a different checkout without copying the
+benchmark harness into that repository:
+
+```bash
+cargo run --release --example retrieval_eval -- \
+  eval/external/example.json \
+  --root /path/to/external/repository
+```
+
+An external corpus should pin the exact Git tree it was authored against:
+
+```json
+{
+  "version": 1,
+  "name": "example-repo-v1",
+  "repository": {
+    "url": "https://github.com/example/project",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  }
+}
+```
+
+`commit` must be a full 40-character Git SHA. Before retrieval starts, the
+evaluator checks that `git rev-parse HEAD` equals that SHA and that the checkout
+is completely clean, including untracked files. A mismatch fails the run. This
+keeps source ranges and retrieval results tied to one immutable tree rather
+than whatever happens to be checked out locally.
+
+The repository URL is provenance metadata. Reproducibility is enforced by the
+commit and clean working tree.
 
 ## Metrics
 
@@ -68,10 +101,10 @@ The evaluator exits non-zero when a gate fails, so it can run directly in CI.
 The initial thresholds are intentionally conservative: this self-retrieval
 corpus is a regression seed, not evidence of general retrieval quality.
 
-## What this corpus does not prove
+## What the self corpus does not prove
 
 `agent-shunt-self-v1` asks questions about this repository itself. It protects
-known retrieval behaviour, but it is not an independent benchmark. The next
-step is to add version-pinned external repositories and human-authored ground
-truth across Rust, TypeScript, Python, Go, and Java. Those results are the ones
-that should support README claims about retrieval quality or token savings.
+known retrieval behaviour, but it is not an independent benchmark. External
+corpora should use version-pinned repositories and human-authored ground truth
+across Rust, TypeScript, Python, Go, and Java. Those results are the ones that
+should support README claims about retrieval quality or token savings.
