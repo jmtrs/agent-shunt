@@ -8,11 +8,8 @@ use std::{
 
 use agent_shunt::{
     adapters::{
-        embedding_index::EmbeddingIndex,
-        filesystem::SecureFilesystem,
-        git::GitChangeSource,
-        local_embedding::LocalEmbedder,
-        ripgrep::RipgrepSearch,
+        embedding_index::EmbeddingIndex, filesystem::SecureFilesystem, git::GitChangeSource,
+        local_embedding::LocalEmbedder, ripgrep::RipgrepSearch,
     },
     application::{
         ports::DenseIndex,
@@ -213,7 +210,8 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
         bail!("repository commit must be a full 40-character Git SHA");
     }
     for case in &corpus.cases {
-        if case.id.trim().is_empty() || case.question.trim().is_empty() || case.expected.is_empty() {
+        if case.id.trim().is_empty() || case.question.trim().is_empty() || case.expected.is_empty()
+        {
             bail!("case id, question, and expected evidence must not be empty");
         }
     }
@@ -368,7 +366,10 @@ fn matches_target(chunk: &RetrievedChunk, target: &ExpectedEvidence) -> bool {
 fn print_report(corpus: &Corpus, report: &Report) {
     print!("{}", report.strategy);
     for k in &corpus.ks {
-        print!("\thit@{k}={:.3}", report.hit_at.get(k).copied().unwrap_or(0.0));
+        print!(
+            "\thit@{k}={:.3}",
+            report.hit_at.get(k).copied().unwrap_or(0.0)
+        );
     }
     println!(
         "\tMRR={:.3}\tavg tokens={:.1}\tavg ms={:.1}\tp95 ms={:.1}",
