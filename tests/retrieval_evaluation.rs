@@ -43,12 +43,13 @@ fn representative_repository_queries_recover_expected_evidence() {
         ),
     ];
     for (question, expected_paths) in cases {
-        // This file embeds every case's question, and the integration
-        // templates embed its vocabulary (validate, ranges, retrieve), so
-        // without the exclusions both outrank the real evidence for each
-        // query (perfect self-matches).
+        // This file and the eval corpus embed every case's question; integration
+        // templates also embed its vocabulary. Exclude benchmark fixtures so a
+        // query cannot retrieve its own ground truth as a perfect self-match.
         let globs = vec![
             "!tests/retrieval_evaluation.rs".to_owned(),
+            "!eval/**".to_owned(),
+            "!examples/**".to_owned(),
             "!integrations/**".to_owned(),
         ];
         let (result, _) = execute(
