@@ -22,122 +22,167 @@ jobs:
     steps:
       - name: Checkout agent-shunt
         uses: actions/checkout@v5
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+
       - name: Install ripgrep dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Checkout pinned ripgrep corpus target
         run: |
           git clone --filter=blob:none https://github.com/BurntSushi/ripgrep.git "$RUNNER_TEMP/ripgrep"
           git -C "$RUNNER_TEMP/ripgrep" checkout --detach 3fce3b5bb0236da2df6d99672afb8a719642eca7
           test "$(git -C "$RUNNER_TEMP/ripgrep" rev-parse HEAD)" = "3fce3b5bb0236da2df6d99672afb8a719642eca7"
+
       - name: Run ripgrep retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/ripgrep.json --root "$RUNNER_TEMP/ripgrep"
+          eval/external/ripgrep.json
+          --root "$RUNNER_TEMP/ripgrep"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/ripgrep.json --root "$RUNNER_TEMP/ripgrep" --json
+          eval/external/ripgrep.json
+          --root "$RUNNER_TEMP/ripgrep"
+          --json
 
   flask:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-shunt
         uses: actions/checkout@v5
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+
       - name: Install ripgrep dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Checkout pinned Flask corpus target
         run: |
           git clone --filter=blob:none https://github.com/pallets/flask.git "$RUNNER_TEMP/flask"
           git -C "$RUNNER_TEMP/flask" checkout --detach d73fa1cdcbd8b1465c151db8924ba58b1dd14e35
           test "$(git -C "$RUNNER_TEMP/flask" rev-parse HEAD)" = "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35"
+
       - name: Run Flask retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/flask.json --root "$RUNNER_TEMP/flask"
+          eval/external/flask.json
+          --root "$RUNNER_TEMP/flask"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/flask.json --root "$RUNNER_TEMP/flask" --json
+          eval/external/flask.json
+          --root "$RUNNER_TEMP/flask"
+          --json
 
   hono:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-shunt
         uses: actions/checkout@v5
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+
       - name: Install ripgrep dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Checkout pinned Hono corpus target
         run: |
           git clone --filter=blob:none https://github.com/honojs/hono.git "$RUNNER_TEMP/hono"
           git -C "$RUNNER_TEMP/hono" checkout --detach 098e11912ab244c5c33931de007f04dc8e3c2929
           test "$(git -C "$RUNNER_TEMP/hono" rev-parse HEAD)" = "098e11912ab244c5c33931de007f04dc8e3c2929"
+
       - name: Run Hono retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/hono.json --root "$RUNNER_TEMP/hono"
+          eval/external/hono.json
+          --root "$RUNNER_TEMP/hono"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/hono.json --root "$RUNNER_TEMP/hono" --json
+          eval/external/hono.json
+          --root "$RUNNER_TEMP/hono"
+          --json
 
   cobra:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-shunt
         uses: actions/checkout@v5
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+
       - name: Install ripgrep dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Checkout pinned Cobra corpus target
         run: |
           git clone --filter=blob:none https://github.com/spf13/cobra.git "$RUNNER_TEMP/cobra"
           git -C "$RUNNER_TEMP/cobra" checkout --detach adbc8813901bba65827259daa8e22ff94ec1f30e
           test "$(git -C "$RUNNER_TEMP/cobra" rev-parse HEAD)" = "adbc8813901bba65827259daa8e22ff94ec1f30e"
+
       - name: Run Cobra retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/cobra.json --root "$RUNNER_TEMP/cobra"
+          eval/external/cobra.json
+          --root "$RUNNER_TEMP/cobra"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/cobra.json --root "$RUNNER_TEMP/cobra" --json
+          eval/external/cobra.json
+          --root "$RUNNER_TEMP/cobra"
+          --json
 
   gson:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-shunt
         uses: actions/checkout@v5
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+
       - name: Install ripgrep dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Checkout pinned Gson corpus target
         run: |
           git clone --filter=blob:none https://github.com/google/gson.git "$RUNNER_TEMP/gson"
           git -C "$RUNNER_TEMP/gson" checkout --detach 854c8255b625cf1e13c701a83ea9ccb4caaa576a
           test "$(git -C "$RUNNER_TEMP/gson" rev-parse HEAD)" = "854c8255b625cf1e13c701a83ea9ccb4caaa576a"
+
       - name: Run Gson retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/gson.json --root "$RUNNER_TEMP/gson"
+          eval/external/gson.json
+          --root "$RUNNER_TEMP/gson"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
-          eval/external/gson.json --root "$RUNNER_TEMP/gson" --json
+          eval/external/gson.json
+          --root "$RUNNER_TEMP/gson"
+          --json
