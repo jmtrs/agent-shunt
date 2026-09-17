@@ -192,7 +192,11 @@ fn validate_corpus(corpus: &Corpus) -> Result<()> {
     Ok(())
 }
 
-fn run_strategy(root: &std::path::Path, corpus: &Corpus, strategy: Strategy) -> Result<StrategyReport> {
+fn run_strategy(
+    root: &std::path::Path,
+    corpus: &Corpus,
+    strategy: Strategy,
+) -> Result<StrategyReport> {
     #[cfg(feature = "ast")]
     let resolver = AstResolver::default();
     #[cfg(not(feature = "ast"))]
@@ -264,8 +268,8 @@ fn run_strategy(root: &std::path::Path, corpus: &Corpus, strategy: Strategy) -> 
         .map(|result| result.delivered_tokens as f64)
         .sum::<f64>()
         / results.len() as f64;
-    let avg_latency_ms = results.iter().map(|result| result.latency_ms).sum::<f64>()
-        / results.len() as f64;
+    let avg_latency_ms =
+        results.iter().map(|result| result.latency_ms).sum::<f64>() / results.len() as f64;
     let mut latencies = results
         .iter()
         .map(|result| result.latency_ms)
@@ -344,10 +348,7 @@ fn print_human(corpus: &Corpus, reports: &[StrategyReport], failures: &[String])
     for report in reports {
         print!("{}", report.strategy);
         for k in &corpus.ks {
-            print!(
-                "\t{:.3}",
-                report.recall_at.get(k).copied().unwrap_or(0.0)
-            );
+            print!("\t{:.3}", report.recall_at.get(k).copied().unwrap_or(0.0));
         }
         println!(
             "\t{:.3}\t{:.1}\t{:.1}\t{:.1}",
