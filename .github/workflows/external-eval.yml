@@ -6,6 +6,7 @@ on:
     paths:
       - "eval/external/**"
       - "examples/retrieval_eval.rs"
+      - "examples/context_savings_eval.rs"
       - "src/application/retrieve.rs"
       - "src/application/resolver.rs"
       - "src/application/ports.rs"
@@ -44,6 +45,12 @@ jobs:
           eval/external/ripgrep.json
           --root "$RUNNER_TEMP/ripgrep"
 
+      - name: Measure ripgrep context savings
+        run: >-
+          cargo run --release --example context_savings_eval --
+          eval/external/ripgrep.json
+          --root "$RUNNER_TEMP/ripgrep"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
@@ -75,6 +82,12 @@ jobs:
       - name: Run Flask retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
+          eval/external/flask.json
+          --root "$RUNNER_TEMP/flask"
+
+      - name: Measure Flask context savings
+        run: >-
+          cargo run --release --example context_savings_eval --
           eval/external/flask.json
           --root "$RUNNER_TEMP/flask"
 
@@ -112,6 +125,12 @@ jobs:
           eval/external/hono.json
           --root "$RUNNER_TEMP/hono"
 
+      - name: Measure Hono context savings
+        run: >-
+          cargo run --release --example context_savings_eval --
+          eval/external/hono.json
+          --root "$RUNNER_TEMP/hono"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
@@ -146,6 +165,12 @@ jobs:
           eval/external/cobra.json
           --root "$RUNNER_TEMP/cobra"
 
+      - name: Measure Cobra context savings
+        run: >-
+          cargo run --release --example context_savings_eval --
+          eval/external/cobra.json
+          --root "$RUNNER_TEMP/cobra"
+
       - name: Print per-case diagnostics
         run: >-
           cargo run --release --example retrieval_eval --
@@ -177,6 +202,12 @@ jobs:
       - name: Run Gson retrieval corpus
         run: >-
           cargo run --release --example retrieval_eval --
+          eval/external/gson.json
+          --root "$RUNNER_TEMP/gson"
+
+      - name: Measure Gson context savings
+        run: >-
+          cargo run --release --example context_savings_eval --
           eval/external/gson.json
           --root "$RUNNER_TEMP/gson"
 
