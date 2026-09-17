@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "name": "hono-v1",
+  "repository": {
+    "url": "https://github.com/honojs/hono",
+    "commit": "098e11912ab244c5c33931de007f04dc8e3c2929"
+  },
+  "budgetTokens": 1200,
+  "contextLines": 8,
+  "maxHits": 40,
+  "globs": [
+    "!**/*.test.ts",
+    "!**/*.test.tsx",
+    "!docs/**",
+    "!examples/**",
+    "!benchmarks/**",
+    "!runtime-tests/**"
+  ],
+  "ks": [1, 3, 5],
+  "strategies": ["lexical", "prf"],
+  "cases": [
+    {
+      "id": "smart-router-selection",
+      "question": "How does the smart router choose a concrete router on the first match, replay registered routes into candidates, skip unsupported path patterns, and then retain only the selected router?",
+      "expected": [
+        { "path": "src/router/smart-router/router.ts" }
+      ]
+    },
+    {
+      "id": "middleware-composition",
+      "question": "How are middleware handlers composed and dispatched through next(), including preventing next from running twice, invoking the error handler for thrown exceptions, and using the not-found handler when no response is finalized?",
+      "expected": [
+        { "path": "src/compose.ts" }
+      ]
+    },
+    {
+      "id": "context-response-construction",
+      "question": "How does a request context construct text, JSON, HTML, and generic responses while combining prepared headers, explicit response headers, and status overrides?",
+      "expected": [
+        { "path": "src/context.ts" }
+      ]
+    },
+    {
+      "id": "form-body-parsing",
+      "question": "How are multipart form-data and URL-encoded request bodies parsed, including repeated fields, array-style names, and dot notation for nested values?",
+      "expected": [
+        { "path": "src/utils/body.ts" }
+      ]
+    },
+    {
+      "id": "request-body-cache",
+      "question": "How does the request wrapper cache a consumed body so callers can request another representation such as text, JSON, blob, arrayBuffer, or formData while preserving the original content type where needed?",
+      "expected": [
+        { "path": "src/request.ts" }
+      ]
+    },
+    {
+      "id": "signed-cookie-helpers",
+      "question": "How do the cookie helpers read and write signed cookies, verify signatures with a secret, apply cookie options, and delete cookies from a response context?",
+      "expected": [
+        { "path": "src/helper/cookie/index.ts" }
+      ]
+    },
+    {
+      "id": "cors-preflight",
+      "question": "How does the CORS middleware resolve allowed origins and methods, set credentials and exposed headers, and construct an OPTIONS preflight response with max-age and allowed request headers?",
+      "expected": [
+        { "path": "src/middleware/cors/index.ts" }
+      ]
+    },
+    {
+      "id": "etag-conditional-response",
+      "question": "How does the ETag middleware generate strong or weak entity tags, compare request validators, and transform matching responses into 304 responses while retaining the permitted headers?",
+      "expected": [
+        { "path": "src/middleware/etag/index.ts" }
+      ]
+    },
+    {
+      "id": "server-sent-events",
+      "question": "How does the server-sent events streaming helper create the event-stream response, expose an SSE writer API to the callback, handle errors, and abort when the request is cancelled?",
+      "expected": [
+        { "path": "src/helper/streaming/sse.ts" }
+      ]
+    },
+    {
+      "id": "typed-client-request",
+      "question": "How does the typed client build a request URL from route path parameters and query values, choose JSON or form request bodies and headers, and execute the request through either a custom fetch implementation or the global fetch?",
+      "expected": [
+        { "path": "src/client/client.ts" }
+      ]
+    }
+  ]
+}
