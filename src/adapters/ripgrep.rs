@@ -459,11 +459,9 @@ fn directory_match_mask(path: &str, forms: &[Vec<String>]) -> u16 {
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
     forms.iter().enumerate().fold(0u16, |mask, (index, forms)| {
-        let matched = components.iter().any(|component| {
-            forms
-                .iter()
-                .any(|form| component.contains(form.as_str()))
-        });
+        let matched = components
+            .iter()
+            .any(|component| forms.iter().any(|form| component.contains(form.as_str())));
         mask | (u16::from(matched) << index)
     })
 }
@@ -574,7 +572,7 @@ fn split_words(term: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     for (index, &character) in chars.iter().enumerate() {
-        if matches!(character, '_' | '-' | '.' | ':' | '/') {
+        if matches!(character, '_' | '-' | '.' | ':', '/') {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
