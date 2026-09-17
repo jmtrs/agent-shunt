@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "name": "flask-v1",
+  "repository": {
+    "url": "https://github.com/pallets/flask",
+    "commit": "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35"
+  },
+  "budgetTokens": 1200,
+  "contextLines": 8,
+  "maxHits": 40,
+  "globs": [
+    "!tests/**",
+    "!docs/**",
+    "!examples/**"
+  ],
+  "ks": [1, 3, 5],
+  "strategies": ["lexical", "prf"],
+  "cases": [
+    {
+      "id": "prefixed-environment-config",
+      "question": "How are prefixed environment variables loaded into configuration, JSON-decoded, and expanded into nested dictionaries using double underscores?",
+      "expected": [
+        { "path": "src/flask/config.py" }
+      ]
+    },
+    {
+      "id": "secure-cookie-session",
+      "question": "How does Flask open and save signed cookie sessions, decide whether the cookie should be written, and apply cookie security attributes?",
+      "expected": [
+        { "path": "src/flask/sessions.py" }
+      ]
+    },
+    {
+      "id": "request-context-lifecycle",
+      "question": "How is a request context pushed and popped, including creating an application context and running request teardown callbacks?",
+      "expected": [
+        { "path": "src/flask/ctx.py" }
+      ]
+    },
+    {
+      "id": "blueprint-registration",
+      "question": "How does registering a blueprint apply its deferred setup functions, URL prefix and subdomain options, and nested blueprints to an application?",
+      "expected": [
+        { "path": "src/flask/sansio/blueprints.py" }
+      ]
+    },
+    {
+      "id": "template-loader-blueprints",
+      "question": "How does the Jinja template loader search the application loader and each registered blueprint loader, including explained template loading?",
+      "expected": [
+        { "path": "src/flask/templating.py" }
+      ]
+    },
+    {
+      "id": "cli-application-discovery",
+      "question": "How does the Flask command line discover and load an application from an import path, including app factories and module attributes?",
+      "expected": [
+        { "path": "src/flask/cli.py" }
+      ]
+    },
+    {
+      "id": "json-provider-response",
+      "question": "How does the default JSON provider serialize extra Python types and build an application response with JSON mimetype and formatting?",
+      "expected": [
+        { "path": "src/flask/json/provider.py" }
+      ]
+    },
+    {
+      "id": "send-file-response",
+      "question": "How does the send_file helper prepare files for a response, including conditional requests, cache age, download names and X-Sendfile support?",
+      "expected": [
+        { "path": "src/flask/helpers.py" }
+      ]
+    },
+    {
+      "id": "async-view-dispatch",
+      "question": "How are async view functions converted to synchronous callables before dispatching a matched request endpoint?",
+      "expected": [
+        { "path": "src/flask/app.py" }
+      ]
+    },
+    {
+      "id": "application-logging",
+      "question": "How is the application logger created, when is the default stream handler attached, and how is debug logging level selected?",
+      "expected": [
+        { "path": "src/flask/logging.py" }
+      ]
+    }
+  ]
+}
