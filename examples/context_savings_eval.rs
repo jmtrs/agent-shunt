@@ -315,7 +315,7 @@ fn compression_ratio(delivered: usize, baseline: usize) -> f64 {
 
 fn median(sorted: &[f64]) -> f64 {
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) / 2.0
     } else {
         sorted[middle]
