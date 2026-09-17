@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "name": "agent-shunt-self-v1",
+  "budgetTokens": 1200,
+  "contextLines": 8,
+  "maxHits": 40,
+  "globs": [
+    "!eval/**",
+    "!examples/**",
+    "!tests/**",
+    "!integrations/**"
+  ],
+  "ks": [1, 3, 5],
+  "strategies": ["lexical", "prf"],
+  "cases": [
+    {
+      "id": "credential-precedence",
+      "question": "credential precedence",
+      "expected": [
+        { "path": "src/adapters/credentials.rs" }
+      ]
+    },
+    {
+      "id": "openrouter-zdr-policy",
+      "question": "zdr data_collection deny require_parameters provider policy",
+      "expected": [
+        { "path": "src/adapters/openai_compatible.rs" }
+      ]
+    },
+    {
+      "id": "source-range-validation",
+      "question": "validate hallucinated source line ranges",
+      "expected": [
+        { "path": "src/application/scan.rs" },
+        { "path": "src/adapters/openai_compatible.rs" }
+      ]
+    },
+    {
+      "id": "metrics-privacy",
+      "question": "metrics log jsonl record privacy sanitize",
+      "expected": [
+        { "path": "src/adapters/metrics.rs" }
+      ]
+    },
+    {
+      "id": "symlink-escape",
+      "question": "reject symlink ancestor filesystem",
+      "expected": [
+        { "path": "src/adapters/filesystem.rs" }
+      ]
+    },
+    {
+      "id": "strict-token-budget",
+      "question": "strict evidence token budget retrieval",
+      "expected": [
+        { "path": "src/application/retrieve.rs" }
+      ]
+    },
+    {
+      "id": "doctor-dispatch",
+      "question": "doctor command CLI dispatch",
+      "expected": [
+        { "path": "src/main.rs" }
+      ]
+    },
+    {
+      "id": "ripgrep-bounds",
+      "question": "ripgrep timeout bounded streaming",
+      "expected": [
+        { "path": "src/adapters/ripgrep.rs" }
+      ]
+    }
+  ],
+  "gates": {
+    "lexical": {
+      "recallAt": { "5": 0.75 },
+      "minMrr": 0.45,
+      "maxAvgTokens": 1200
+    },
+    "prf": {
+      "recallAt": { "5": 0.75 },
+      "minMrr": 0.45,
+      "maxAvgTokens": 1200
+    }
+  }
+}
