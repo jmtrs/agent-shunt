@@ -52,8 +52,10 @@ commit and clean working tree.
 
 ## Metrics
 
-- **Recall@K**: fraction of questions whose first matching ground-truth evidence
-  appears in the first K returned chunks.
+- **Hit@K**: fraction of questions with at least one acceptable ground-truth
+  target in the first K returned chunks. Each entry in a case's `expected`
+  array is an acceptable alternative, so this is a per-question success metric,
+  not recall over a set of required evidence items.
 - **MRR**: mean reciprocal rank of the first matching ground-truth chunk.
 - **avg tokens**: mean `estimatedTokens` delivered by retrieval. This is bounded
   by the corpus token budget.
@@ -83,13 +85,13 @@ A retrieved chunk satisfies a ranged target when their line spans overlap.
 ## Gates
 
 `gates` makes quality regressions executable instead of descriptive. Each
-strategy may require minimum Recall@K / MRR and a maximum average token count:
+strategy may require minimum Hit@K / MRR and a maximum average token count:
 
 ```json
 {
   "gates": {
     "lexical": {
-      "recallAt": { "5": 0.75 },
+      "hitAt": { "5": 0.75 },
       "minMrr": 0.45,
       "maxAvgTokens": 1200
     }
@@ -98,6 +100,8 @@ strategy may require minimum Recall@K / MRR and a maximum average token count:
 ```
 
 The evaluator exits non-zero when a gate fails, so it can run directly in CI.
+For compatibility with existing version-1 corpus files, the harness still
+accepts `recallAt` as an input alias, but reports and new corpora use `hitAt`.
 The initial thresholds are intentionally conservative: this self-retrieval
 corpus is a regression seed, not evidence of general retrieval quality.
 
