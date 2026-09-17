@@ -118,3 +118,37 @@ jobs:
           eval/external/hono.json
           --root "$RUNNER_TEMP/hono"
           --json
+
+  cobra:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-shunt
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Checkout pinned Cobra corpus target
+        run: |
+          git clone --filter=blob:none https://github.com/spf13/cobra.git "$RUNNER_TEMP/cobra"
+          git -C "$RUNNER_TEMP/cobra" checkout --detach adbc8813901bba65827259daa8e22ff94ec1f30e
+          test "$(git -C "$RUNNER_TEMP/cobra" rev-parse HEAD)" = "adbc8813901bba65827259daa8e22ff94ec1f30e"
+
+      - name: Run Cobra retrieval corpus
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/cobra.json
+          --root "$RUNNER_TEMP/cobra"
+
+      - name: Print per-case diagnostics
+        run: >-
+          cargo run --release --example retrieval_eval --
+          eval/external/cobra.json
+          --root "$RUNNER_TEMP/cobra"
+          --json
