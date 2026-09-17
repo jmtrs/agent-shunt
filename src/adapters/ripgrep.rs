@@ -393,7 +393,14 @@ fn filename_hits(
         if has_binary_extension(&path) {
             continue;
         }
-        let normalized = path.to_lowercase();
+        // A filename boost is a locator for the file itself, not its ancestors.
+        // Matching the whole path lets a query term such as `matcher` promote
+        // every file under `crates/matcher/`, including licenses and manifests.
+        let normalized = Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path.as_str())
+            .to_lowercase();
         let matched_terms = forms.iter().enumerate().fold(0u16, |mask, (index, forms)| {
             mask | (u16::from(forms.iter().any(|form| normalized.contains(form.as_str()))) << index)
         });
@@ -759,6 +766,25 @@ mod tests {
             .search(root.path(), "Auth token", 10, &[])
             .unwrap();
         assert!(hits.iter().any(|hit| hit.path == "code.rs"));
+    }
+
+    #[test]
+    fn filename_hits_only_match_the_basename() {
+        use super::filename_hits;
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("matcher")).unwrap();
+        fs::write(root.path().join("matcher/noise.rs"), "fn noise() {}\n").unwrap();
+        fs::write(root.path().join("matcher.rs"), "fn subject() {}\n").unwrap();
+
+        let forms = vec![vec!["matcher".to_owned()]];
+        let paths = filename_hits(root.path(), &forms, &[], 100)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["matcher.rs".to_owned()]);
     }
 
     #[test]
