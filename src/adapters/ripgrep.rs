@@ -100,6 +100,12 @@ const COVERAGE_TAIL_DIVISOR: usize = 3;
 /// so `create-table.png` cannot dominate the way it used to.
 const FILENAME_BOOST: usize = 8;
 
+/// A matching parent directory is useful module/package evidence, but it is a
+/// much weaker locator than the basename. It only augments files that already
+/// matched query content, so a directory called `matcher` cannot inject every
+/// descendant into the ranked set by itself.
+const PATH_COMPONENT_BOOST: usize = 2;
+
 /// Documentation and prose files match broad natural-language vocabulary, so a
 /// README or CHANGELOG easily outranks the real source for a code question.
 /// This worker is a source-code analyst, so a prose file's score is scaled to
@@ -295,6 +301,21 @@ impl CodeSearch for RipgrepSearch {
                 .and_modify(|value| *value = (*value).max(boost))
                 .or_insert(boost);
         }
+        // Parent directories carry weaker package/module evidence. Only files
+        // already present in `coverage` can receive it; a path component match
+        // alone never creates a retrieval hit.
+        let path_component_boost = coverage
+            .keys()
+            .filter_map(|path| {
+                let mask = directory_match_mask(path, &forms);
+                (mask != 0).then(|| {
+                    (
+                        path.clone(),
+                        weight_of(mask, &term_weight) * PATH_COMPONENT_BOOST,
+                    )
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         for hit in &mut hits {
             let line_weight = weight_of(hit.matched_terms, &term_weight);
             let file_weight = coverage
@@ -303,9 +324,14 @@ impl CodeSearch for RipgrepSearch {
                 .map(|mask| coverage_weight(mask, &term_weight))
                 .unwrap_or_default();
             let name_boost = filename_boost.get(hit.path.as_str()).copied().unwrap_or(0);
+            let path_boost = path_component_boost
+                .get(hit.path.as_str())
+                .copied()
+                .unwrap_or(0);
             // Reward the matching line, a smaller bonus for how much of the whole
-            // query the file covers, and the filename locator boost.
-            hit.score = line_weight * 2 + file_weight + name_boost;
+            // query the file covers, a strong basename locator, and a weak
+            // parent-directory package/module signal.
+            hit.score = line_weight * 2 + file_weight + name_boost + path_boost;
         }
         // Keep a filename hit only for a file with no content match. Where the
         // file also matches in content, its boost is already folded into those
@@ -393,10 +419,9 @@ fn filename_hits(
         if has_binary_extension(&path) {
             continue;
         }
-        // The boost is intentionally a *filename* signal. Matching query terms
-        // against the whole relative path would promote every file under a
-        // similarly named directory (`crates/matcher/**` for "matcher"), even
-        // when the basename itself carries no locating evidence.
+        // The strong locator signal is intentionally basename-only. Parent
+        // directories are scored separately and more weakly, only for files
+        // that already have content matches.
         let normalized = Path::new(&path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -423,6 +448,24 @@ fn filename_hits(
         bail!("ripgrep file listing failed with status {status}");
     }
     Ok(hits)
+}
+
+fn directory_match_mask(path: &str, forms: &[Vec<String>]) -> u16 {
+    let components = Path::new(path)
+        .parent()
+        .into_iter()
+        .flat_map(|parent| parent.iter())
+        .filter_map(|component| component.to_str())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    forms.iter().enumerate().fold(0u16, |mask, (index, forms)| {
+        let matched = components.iter().any(|component| {
+            forms
+                .iter()
+                .any(|form| component.contains(form.as_str()))
+        });
+        mask | (u16::from(matched) << index)
+    })
 }
 
 fn line_reader(
@@ -809,6 +852,29 @@ mod tests {
         let hits = filename_hits(root.path(), &[term_forms("matcher")], &[], 20).unwrap();
         assert!(hits.iter().any(|hit| hit.path == "actual-matcher.rs"));
         assert!(hits.iter().all(|hit| hit.path != "matcher/noise.rs"));
+    }
+
+    #[test]
+    fn parent_directory_signal_only_boosts_existing_content_hits() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::create_dir(root.path().join("z-matcher")).unwrap();
+        fs::write(root.path().join("a/other.rs"), "fn selected_glob() {}\n").unwrap();
+        fs::write(
+            root.path().join("z-matcher/related.rs"),
+            "fn selected_glob() {}\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("z-matcher/noise.rs"), "").unwrap();
+
+        let hits = RipgrepSearch
+            .search(root.path(), "matcher selected glob", 20, &[])
+            .unwrap();
+        assert_eq!(
+            hits.first().map(|hit| hit.path.as_str()),
+            Some("z-matcher/related.rs")
+        );
+        assert!(hits.iter().all(|hit| hit.path != "z-matcher/noise.rs"));
     }
 
     #[test]
