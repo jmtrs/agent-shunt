@@ -393,13 +393,14 @@ fn filename_hits(
         if has_binary_extension(&path) {
             continue;
         }
-        // A filename boost is a locator for the file itself, not its ancestors.
-        // Matching the whole path lets a query term such as `matcher` promote
-        // every file under `crates/matcher/`, including licenses and manifests.
+        // The boost is intentionally a *filename* signal. Matching query terms
+        // against the whole relative path would promote every file under a
+        // similarly named directory (`crates/matcher/**` for "matcher"), even
+        // when the basename itself carries no locating evidence.
         let normalized = Path::new(&path)
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or(path.as_str())
+            .unwrap_or(&path)
             .to_lowercase();
         let matched_terms = forms.iter().enumerate().fold(0u16, |mask, (index, forms)| {
             mask | (u16::from(forms.iter().any(|form| normalized.contains(form.as_str()))) << index)
@@ -769,25 +770,6 @@ mod tests {
     }
 
     #[test]
-    fn filename_hits_only_match_the_basename() {
-        use super::filename_hits;
-
-        let root = tempdir().unwrap();
-        fs::create_dir(root.path().join("matcher")).unwrap();
-        fs::write(root.path().join("matcher/noise.rs"), "fn noise() {}\n").unwrap();
-        fs::write(root.path().join("matcher.rs"), "fn subject() {}\n").unwrap();
-
-        let forms = vec![vec!["matcher".to_owned()]];
-        let paths = filename_hits(root.path(), &forms, &[], 100)
-            .unwrap()
-            .into_iter()
-            .map(|hit| hit.path)
-            .collect::<Vec<_>>();
-
-        assert_eq!(paths, vec!["matcher.rs".to_owned()]);
-    }
-
-    #[test]
     fn many_file_search_stops_at_hit_limit() {
         let root = tempdir().unwrap();
         for index in 0..300 {
@@ -813,6 +795,20 @@ mod tests {
         // buried inside `constable` / `comfortable`.
         assert!(hits.iter().any(|hit| hit.path == "hit.rs"));
         assert!(!hits.iter().any(|hit| hit.path == "noise.rs"));
+    }
+
+    #[test]
+    fn filename_hits_ignore_parent_directory_names() {
+        use super::{filename_hits, term_forms};
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("matcher")).unwrap();
+        fs::write(root.path().join("matcher/noise.rs"), "").unwrap();
+        fs::write(root.path().join("actual-matcher.rs"), "").unwrap();
+
+        let hits = filename_hits(root.path(), &[term_forms("matcher")], &[], 20).unwrap();
+        assert!(hits.iter().any(|hit| hit.path == "actual-matcher.rs"));
+        assert!(hits.iter().all(|hit| hit.path != "matcher/noise.rs"));
     }
 
     #[test]
