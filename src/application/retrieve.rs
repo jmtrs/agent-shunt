@@ -101,6 +101,11 @@ const SAME_PATH_SIM: f64 = 0.5;
 /// budget with noise that never answers the question.
 pub const MIN_SCORE_PERCENT: usize = 15;
 
+/// Minimum lead the top semantic file must have over the next distinct file,
+/// expressed as a fraction of the leader's cosine similarity. Near-ties are
+/// ambiguous and must not evict lexical evidence under a fixed token budget.
+const SEMANTIC_MIN_RELATIVE_FILE_MARGIN: f32 = 0.02;
+
 /// Per-chunk cost of the JSON envelope the caller actually receives: field
 /// names, quotes, structure, newline escaping, and pretty-print whitespace,
 /// beyond the raw content and path. Budgeting on content bytes alone
@@ -123,12 +128,6 @@ const CLIFF_GAP_PERCENT: usize = 30;
 /// right below itself; keeping a floor of files preserves the expected evidence
 /// (which is almost always within the top few) while still trimming the shoulder.
 const MIN_CLIFF_FILES: usize = 3;
-
-/// Reciprocal Rank Fusion smoothing constant. The standard value: it damps the
-/// weight of any single list's top ranks so neither the lexical nor the dense
-/// ranking dominates, and fusing on ranks sidesteps the incompatible score
-/// scales of BM25-style weights and cosine similarity.
-const RRF_K: f64 = 60.0;
 
 /// Most candidates sent to the LLM re-ranker. Reranking is the costly stage, so
 /// it is applied only to the head of the ranking (broad recall first, precise
@@ -755,12 +754,36 @@ fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> V
         .collect()
 }
 
-/// Fuses the lexical candidate ranking with the dense index's recall via
-/// Reciprocal Rank Fusion. Each dense hit either boosts an overlapping lexical
-/// candidate or, when the lexical search never touched that region, joins the
-/// pool as a fresh candidate. The fused rank becomes each candidate's new score,
-/// so the downstream floor, MMR ordering, and budget packing all operate on the
-/// hybrid ranking without further change.
+/// Returns the top semantic file only when it is meaningfully separated from
+/// the next distinct file. The ratio is relative to the leader's own cosine
+/// similarity, avoiding an absolute similarity threshold tied to one model.
+fn confident_dense_head_path(hits: &[DenseHit]) -> Option<&str> {
+    let head = hits.first()?;
+    if !head.similarity.is_finite() || head.similarity <= 0.0 {
+        return None;
+    }
+
+    let Some(runner_up) = hits.iter().find(|hit| hit.path != head.path) else {
+        return Some(head.path.as_str());
+    };
+    if !runner_up.similarity.is_finite() {
+        return None;
+    }
+
+    let relative_margin =
+        (head.similarity - runner_up.similarity) / head.similarity.abs().max(f32::EPSILON);
+    (relative_margin >= SEMANTIC_MIN_RELATIVE_FILE_MARGIN).then_some(head.path.as_str())
+}
+
+/// Preserves the lexical head while allowing one novel semantic region to
+/// compete with the lexical tail. Dense recall is a bounded escape hatch for
+/// evidence the lexical search missed, not a second authority over the ranking:
+/// existing lexical scores are never rewritten and dense evidence can never
+/// tie or outrank the strongest lexical candidate.
+///
+/// Only one non-overlapping dense region is admitted. This is deliberate: the
+/// downstream relevance floor, MMR, and token budget can then trade that region
+/// against weak lexical evidence without semantic recall flooding the context.
 fn fuse_dense(
     candidates: &mut Vec<RetrievedChunk>,
     hits: &[DenseHit],
@@ -768,18 +791,64 @@ fn fuse_dense(
     budget: usize,
     why: bool,
 ) {
-    let lexical_rank = (0..candidates.len()).collect::<Vec<_>>();
-    let mut dense_rank = Vec::new();
-    // `hits` arrive sorted by descending similarity, so pushing in order yields
-    // the dense ranking directly.
-    for hit in hits {
-        if let Some(index) = candidates
-            .iter()
-            .position(|candidate| candidate.path == hit.path && overlaps(candidate, hit))
-        {
-            if !dense_rank.contains(&index) {
-                dense_rank.push(index);
+    // When lexical retrieval found nothing, semantic recall is the only evidence
+    // source. Keep its native order and give every valid, budget-fit hit a score.
+    if candidates.is_empty() {
+        for (rank, hit) in hits.iter().enumerate() {
+            let Some(document) = by_path.get(&hit.path) else {
+                continue;
+            };
+            if hit.range.end_line > document.line_count {
+                continue;
             }
+            let content = document.numbered_range(hit.range);
+            let estimated_tokens = delivered_tokens(&content, &hit.path);
+            if estimated_tokens > budget {
+                continue;
+            }
+            candidates.push(RetrievedChunk {
+                path: hit.path.clone(),
+                start_line: hit.range.start_line,
+                end_line: hit.range.end_line,
+                score: hits.len().saturating_sub(rank).max(1),
+                estimated_tokens,
+                content,
+                source: why.then(|| "dense".to_owned()),
+                matched_terms: why.then(Vec::new),
+            });
+        }
+        return;
+    }
+
+    let top_score = candidates[0].score;
+    // A zero-scored lexical head carries no meaningful score gap to preserve.
+    // Refuse to invent semantic authority in that degenerate case.
+    if top_score == 0 {
+        return;
+    }
+
+    let Some(dense_head_path) = confident_dense_head_path(hits) else {
+        return;
+    };
+
+    let second_score = candidates
+        .get(1)
+        .map(|candidate| candidate.score)
+        .unwrap_or(top_score);
+    let dense_score = second_score.min(top_score - 1);
+
+    // Dense hits arrive sorted by descending similarity. Only the confident
+    // head file may contribute a region; falling through to a lower-ranked
+    // semantic file would spend lexical budget on evidence the confidence test
+    // did not actually validate.
+    for hit in hits {
+        if hit.path != dense_head_path {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|candidate| candidate.path == hit.path && overlaps(candidate, hit))
+        {
             continue;
         }
         let Some(document) = by_path.get(&hit.path) else {
@@ -790,7 +859,6 @@ fn fuse_dense(
         }
         let content = document.numbered_range(hit.range);
         let estimated_tokens = delivered_tokens(&content, &hit.path);
-        // A chunk that cannot ever fit the budget is not worth ranking.
         if estimated_tokens > budget {
             continue;
         }
@@ -798,25 +866,15 @@ fn fuse_dense(
             path: hit.path.clone(),
             start_line: hit.range.start_line,
             end_line: hit.range.end_line,
-            score: 0,
+            score: dense_score,
             estimated_tokens,
             content,
-            // Recalled by meaning, not by any shared query term: mark it so a
-            // caller sees the chunk earned its place from the semantic index.
             source: why.then(|| "dense".to_owned()),
             matched_terms: why.then(Vec::new),
         });
-        dense_rank.push(candidates.len() - 1);
+        break;
     }
-    let fused = reciprocal_rank_fusion(&[lexical_rank, dense_rank], RRF_K);
-    let count = candidates.len();
-    for (position, (index, _)) in fused.iter().enumerate() {
-        // Fused rank -> descending integer score the rest of the pipeline reads.
-        // Scores become dense linear ranks, so the downstream `MIN_SCORE_PERCENT`
-        // floor trims by rank position here, not by ratio to the top term score —
-        // intended: after fusion the lexical magnitudes are no longer comparable.
-        candidates[*index].score = count - position;
-    }
+
     candidates.sort_by(|left, right| {
         right
             .score
@@ -882,28 +940,6 @@ fn rerank_candidates(
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
     Ok(())
-}
-
-/// Reciprocal Rank Fusion: combines several ranked lists (each a sequence of
-/// candidate indices, best first) into one, scoring every candidate by the sum
-/// of `1 / (k + rank)` across the lists it appears in. Returns `(index, score)`
-/// pairs sorted by fused score, ties broken by index for determinism.
-fn reciprocal_rank_fusion(lists: &[Vec<usize>], k: f64) -> Vec<(usize, f64)> {
-    let mut scores: BTreeMap<usize, f64> = BTreeMap::new();
-    for list in lists {
-        for (rank, &index) in list.iter().enumerate() {
-            *scores.entry(index).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
-        }
-    }
-    let mut fused = scores.into_iter().collect::<Vec<_>>();
-    fused.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left.0.cmp(&right.0))
-    });
-    fused
 }
 
 /// Tokens the caller actually pays for a chunk: its numbered content and path,
@@ -1045,7 +1081,6 @@ mod tests {
     use super::{
         ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, decode_terms,
         estimate_tokens, execute, fuse_dense, identifier_tokens, is_compound_identifier,
-        reciprocal_rank_fusion,
     };
 
     #[test]
@@ -1075,15 +1110,6 @@ mod tests {
         // bits 0 and 2 set -> alpha and gamma, in term order.
         assert_eq!(decode_terms(0b101, &terms), vec!["alpha", "gamma"]);
         assert_eq!(decode_terms(0, &terms), Vec::<String>::new());
-    }
-
-    #[test]
-    fn reciprocal_rank_fusion_rewards_agreement_across_lists() {
-        // One list ranks A>B>C, the other C>A>B. A appears near the top of both,
-        // so it wins; C's single first place lifts it above B.
-        let fused = reciprocal_rank_fusion(&[vec![0, 1, 2], vec![2, 0, 1]], 60.0);
-        let order = fused.iter().map(|(index, _)| *index).collect::<Vec<_>>();
-        assert_eq!(order, vec![0, 2, 1]);
     }
 
     struct MockRerank(Vec<f32>);
@@ -1273,10 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_fusion_injects_a_new_chunk_and_boosts_it() {
-        // Lexical pool holds a.rs and b.rs. The dense index recalls c.rs (a file
-        // the lexical search never hit) as its top match, so fusion must inject
-        // c.rs and rank it above the lexically weaker b.rs.
+    fn dense_fusion_preserves_the_lexical_head_and_scores_below_it() {
         let chunk = |path: &str, score: usize| RetrievedChunk {
             path: path.to_owned(),
             start_line: 1,
@@ -1296,9 +1319,8 @@ mod tests {
             numbered_content: String::new(),
             allowed_ranges: Vec::new(),
         };
-        let mut by_path: BTreeMap<String, &Document> = BTreeMap::new();
-        by_path.insert("c.rs".to_owned(), &doc);
-        let hits = vec![DenseHit {
+        let by_path = BTreeMap::from([("c.rs".to_owned(), &doc)]);
+        let hits = [DenseHit {
             path: "c.rs".to_owned(),
             range: LineRange {
                 start_line: 1,
@@ -1306,23 +1328,300 @@ mod tests {
             },
             similarity: 0.9,
         }];
+
         fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
-        assert!(
-            candidates.iter().any(|candidate| candidate.path == "c.rs"),
-            "dense-only chunk was not injected"
-        );
-        let order = candidates
+
+        assert_eq!(candidates[0].path, "a.rs");
+        assert_eq!(candidates[0].score, 100);
+        let dense = candidates
             .iter()
-            .map(|candidate| candidate.path.as_str())
-            .collect::<Vec<_>>();
-        // a.rs leads both rankings; c.rs (dense #1) outranks b.rs.
-        assert_eq!(order[0], "a.rs");
-        let c_pos = order.iter().position(|&p| p == "c.rs").unwrap();
-        let b_pos = order.iter().position(|&p| p == "b.rs").unwrap();
+            .find(|candidate| candidate.path == "c.rs")
+            .expect("dense-only chunk was not injected");
+        assert_eq!(dense.score, 90);
+        assert!(dense.score < candidates[0].score);
+    }
+
+    #[test]
+    fn dense_fusion_does_not_confuse_line_overlap_across_files() {
+        let mut candidates = vec![RetrievedChunk {
+            path: "a.rs".to_owned(),
+            start_line: 10,
+            end_line: 20,
+            score: 100,
+            estimated_tokens: 10,
+            content: "lexical".to_owned(),
+            source: None,
+            matched_terms: None,
+        }];
+        let doc = Document {
+            path: "b.rs".to_owned(),
+            bytes: 20,
+            line_count: 30,
+            lines: (1..=30).map(|line| format!("line {line}")).collect(),
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("b.rs".to_owned(), &doc)]);
+        let hits = [DenseHit {
+            path: "b.rs".to_owned(),
+            range: LineRange {
+                start_line: 12,
+                end_line: 15,
+            },
+            similarity: 0.95,
+        }];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
         assert!(
-            c_pos < b_pos,
-            "dense recall did not outrank weak lexical: {order:?}"
+            candidates.iter().any(|candidate| candidate.path == "b.rs"),
+            "an overlapping line range in another file incorrectly blocked dense recall"
         );
+    }
+
+    #[test]
+    fn dense_fusion_admits_only_the_first_novel_region() {
+        let mut candidates = vec![RetrievedChunk {
+            path: "a.rs".to_owned(),
+            start_line: 1,
+            end_line: 2,
+            score: 100,
+            estimated_tokens: 10,
+            content: "lexical".to_owned(),
+            source: None,
+            matched_terms: None,
+        }];
+        let c_doc = Document {
+            path: "c.rs".to_owned(),
+            bytes: 12,
+            line_count: 1,
+            lines: vec!["dense c".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let d_doc = Document {
+            path: "d.rs".to_owned(),
+            bytes: 12,
+            line_count: 1,
+            lines: vec!["dense d".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([
+            ("c.rs".to_owned(), &c_doc),
+            ("d.rs".to_owned(), &d_doc),
+        ]);
+        let hits = [
+            DenseHit {
+                path: "c.rs".to_owned(),
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
+                similarity: 0.9,
+            },
+            DenseHit {
+                path: "d.rs".to_owned(),
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
+                similarity: 0.8,
+            },
+        ];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        assert!(candidates.iter().any(|candidate| candidate.path == "c.rs"));
+        assert!(!candidates.iter().any(|candidate| candidate.path == "d.rs"));
+    }
+
+    #[test]
+    fn dense_fusion_cannot_tie_a_unit_scored_lexical_head() {
+        let mut candidates = vec![RetrievedChunk {
+            path: "a.rs".to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score: 1,
+            estimated_tokens: 10,
+            content: "lexical".to_owned(),
+            source: None,
+            matched_terms: None,
+        }];
+        let doc = Document {
+            path: "b.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("b.rs".to_owned(), &doc)]);
+        let hits = [DenseHit {
+            path: "b.rs".to_owned(),
+            range: LineRange {
+                start_line: 1,
+                end_line: 1,
+            },
+            similarity: 0.9,
+        }];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        assert_eq!(candidates[0].path, "a.rs");
+        assert_eq!(candidates[0].score, 1);
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|candidate| candidate.path == "b.rs")
+                .expect("dense candidate missing")
+                .score,
+            0
+        );
+    }
+
+    #[test]
+    fn dense_fusion_skips_an_ambiguous_semantic_head() {
+        let mut candidates = vec![RetrievedChunk {
+            path: "lexical.rs".to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score: 100,
+            estimated_tokens: 10,
+            content: "lexical".to_owned(),
+            source: None,
+            matched_terms: None,
+        }];
+        let a = Document {
+            path: "a.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense a".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let b = Document {
+            path: "b.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense b".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("a.rs".to_owned(), &a), ("b.rs".to_owned(), &b)]);
+        let hits = [
+            DenseHit {
+                path: "a.rs".to_owned(),
+                range: LineRange { start_line: 1, end_line: 1 },
+                similarity: 0.80,
+            },
+            DenseHit {
+                path: "b.rs".to_owned(),
+                range: LineRange { start_line: 1, end_line: 1 },
+                similarity: 0.79,
+            },
+        ];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, "lexical.rs");
+    }
+
+    #[test]
+    fn dense_fusion_admits_a_clearly_separated_semantic_head() {
+        let mut candidates = vec![RetrievedChunk {
+            path: "lexical.rs".to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score: 100,
+            estimated_tokens: 10,
+            content: "lexical".to_owned(),
+            source: None,
+            matched_terms: None,
+        }];
+        let a = Document {
+            path: "a.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense a".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let b = Document {
+            path: "b.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense b".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("a.rs".to_owned(), &a), ("b.rs".to_owned(), &b)]);
+        let hits = [
+            DenseHit {
+                path: "a.rs".to_owned(),
+                range: LineRange { start_line: 1, end_line: 1 },
+                similarity: 0.82,
+            },
+            DenseHit {
+                path: "b.rs".to_owned(),
+                range: LineRange { start_line: 1, end_line: 1 },
+                similarity: 0.78,
+            },
+        ];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        assert!(candidates.iter().any(|candidate| candidate.path == "a.rs"));
+        assert!(!candidates.iter().any(|candidate| candidate.path == "b.rs"));
+    }
+
+    #[test]
+    fn dense_fusion_never_falls_through_to_a_runner_up_file() {
+        let mut candidates = vec![RetrievedChunk {
+            path: "a.rs".to_owned(),
+            start_line: 1,
+            end_line: 20,
+            score: 100,
+            estimated_tokens: 10,
+            content: "lexical a".to_owned(),
+            source: None,
+            matched_terms: None,
+        }];
+        let a = Document {
+            path: "a.rs".to_owned(),
+            bytes: 30,
+            line_count: 20,
+            lines: (1..=20).map(|line| format!("a {line}")).collect(),
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let b = Document {
+            path: "b.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense b".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("a.rs".to_owned(), &a), ("b.rs".to_owned(), &b)]);
+        let hits = [
+            DenseHit {
+                path: "a.rs".to_owned(),
+                range: LineRange { start_line: 5, end_line: 10 },
+                similarity: 0.90,
+            },
+            DenseHit {
+                path: "b.rs".to_owned(),
+                range: LineRange { start_line: 1, end_line: 1 },
+                similarity: 0.80,
+            },
+        ];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, "a.rs");
     }
 
     #[test]
