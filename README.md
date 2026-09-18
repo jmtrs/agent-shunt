@@ -39,7 +39,7 @@ The opt-in local semantic path was evaluated on the **same 50 questions, pinned 
 | lexical | **50%** | 74% | 78% | 0.602 |
 | local semantic | **50%** | **84%** | **88%** | **0.662** |
 
-The confidence-gated semantic path keeps aggregate Hit@1 unchanged while adding **10 percentage points at Hit@3 and Hit@5** and improving MRR by **0.060**. It is not uniformly better on every repository: on ripgrep, Hit@3 moves from 80% to 70%, while Hit@5 stays at 90% and MRR improves slightly from 0.587 to 0.595. Per-repository results and reproduction instructions are in [`eval/RESULTS.md`](eval/RESULTS.md).
+The confidence-gated semantic path keeps aggregate Hit@1 unchanged while adding **10 percentage points at Hit@3 and Hit@5** and improving MRR by **0.060**. Average delivered context is **1,052 estimated tokens/query** versus **1,037** for lexical retrieval, under the same 1,200-token cap. It is not uniformly better on every repository: on ripgrep, Hit@3 moves from 80% to 70%, while Hit@5 stays at 90% and MRR improves slightly from 0.587 to 0.595. Per-repository results and reproduction instructions are in [`eval/RESULTS.md`](eval/RESULTS.md), with a machine-readable snapshot in [`eval/results/2026-09-18-semantic.json`](eval/results/2026-09-18-semantic.json).
 
 ## Two paths
 
