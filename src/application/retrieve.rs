@@ -1214,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_fusion_does_not_deepen_a_lexically_weak_file() {
+    fn dense_fusion_does_not_deepen_a_file_that_survives_the_lexical_floor() {
         let mut candidates = vec![
             RetrievedChunk {
                 path: "head.rs".to_owned(),
@@ -1298,6 +1298,74 @@ mod tests {
                 .iter()
                 .all(|candidate| !(candidate.path == "a.rs" && candidate.start_line == 10))
         );
+    }
+
+    #[test]
+    fn dense_fusion_can_rescue_a_same_file_match_below_the_lexical_floor() {
+        let mut candidates = vec![
+            RetrievedChunk {
+                path: "head.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score: 100,
+                estimated_tokens: 10,
+                content: "head".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+            RetrievedChunk {
+                path: "second.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score: 80,
+                estimated_tokens: 10,
+                content: "second".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+            RetrievedChunk {
+                path: "weak.rs".to_owned(),
+                start_line: 1,
+                end_line: 2,
+                score: 10,
+                estimated_tokens: 10,
+                content: "weak lexical".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+        ];
+        let weak = Document {
+            path: "weak.rs".to_owned(),
+            bytes: 60,
+            line_count: 20,
+            lines: (1..=20).map(|line| format!("weak {line}")).collect(),
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("weak.rs".to_owned(), &weak)]);
+        let hits = [DenseHit {
+            path: "weak.rs".to_owned(),
+            range: LineRange {
+                start_line: 10,
+                end_line: 12,
+            },
+            similarity: 0.90,
+        }];
+
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
+
+        let dense = candidates
+            .iter()
+            .find(|candidate| candidate.path == "weak.rs" && candidate.start_line == 10)
+            .expect("semantic recall should rescue a file whose lexical evidence is below floor");
+        assert_eq!(dense.score, 80);
     }
 
     #[test]
