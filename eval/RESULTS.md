@@ -1,6 +1,7 @@
-# Context savings benchmark results
+# Retrieval benchmark results
 
-Date: 2026-09-17
+Context-savings baseline: 2026-09-17  
+Semantic retrieval update: 2026-09-18
 
 These results measure source-context efficiency and retrieval quality for `agent-shunt` lexical retrieval across 50 human-authored architecture and implementation questions over five pinned open-source repositories in Rust, Python, TypeScript, Go, and Java.
 
@@ -33,6 +34,44 @@ The file-level retrieval comparison is also favorable in aggregate:
 | plain `rg` ranking | 28% | 62% | 74% | 0.489 |
 
 These are separate from `agent-shunt`'s chunk-level quality metrics. Chunk-level lexical quality remains **Hit@1 50%**, **Hit@3 74%**, **Hit@5 78%**, and **MRR 0.602** under the 1,200-token budget.
+
+## Semantic retrieval quality
+
+The opt-in local semantic path uses the production confidence-gated fusion policy with `bge-small-en-v1.5` and dense top-k 24. It was evaluated against lexical retrieval on the same 50 human-authored questions, same pinned repositories, same AST chunking and MMR pipeline, and the same 1,200-token evidence budget.
+
+| Repository | Lexical Hit@1 | Hit@3 | Hit@5 | Lexical MRR | Semantic Hit@1 | Hit@3 | Hit@5 | Semantic MRR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ripgrep | 40% | **80%** | 90% | 0.587 | 40% | 70% | 90% | **0.595** |
+| Flask | 60% | 70% | 70% | 0.633 | 60% | **90%** | **90%** | **0.750** |
+| Hono | 30% | 60% | 60% | 0.417 | 30% | **80%** | **80%** | **0.500** |
+| Cobra | 90% | 90% | 100% | 0.925 | 90% | **100%** | 100% | **0.950** |
+| Gson | 30% | 70% | 70% | 0.450 | 30% | **80%** | **80%** | **0.517** |
+| **Aggregate, 50 cases** | **50%** | 74% | 78% | 0.602 | **50%** | **84%** | **88%** | **0.662** |
+
+Aggregate Hit@1 is unchanged. Semantic retrieval adds **10 percentage points at Hit@3 and Hit@5** and improves MRR by about **0.060**.
+
+The result is intentionally not presented as a universal win. On ripgrep, `gitignore-matching` moves from rank 3 to rank 4 because semantic recall introduces `crates/ignore/src/incremental.rs`; `file-type-globs` moves from rank 3 to rank 2. As a result, ripgrep Hit@3 falls from 80% to 70%, while Hit@5 remains 90% and MRR rises slightly from 0.587 to 0.595. This trade-off is kept visible rather than tuning specifically to the benchmark case.
+
+The production semantic policy is bounded:
+
+1. lexical scores and the lexical #1 result remain authoritative;
+2. at most one semantic region is admitted;
+3. the leading semantic file must beat the next distinct semantic file by a relative confidence margin;
+4. semantic recall does not fall through to a lower-ranked file when the validated head cannot contribute;
+5. all evidence still competes under the same token budget.
+
+The local FastEmbed backend uses a bounded batch size of 32. This was validated against ripgrep's ~246 KiB `crates/core/flags/defs.rs`, which previously caused the hosted evaluation runner to be terminated under the larger automatic batch.
+
+Reproduce one corpus:
+
+```bash
+cargo run --release --features local-embed --example semantic_eval -- \
+  eval/external/<corpus>.json \
+  --root /path/to/pinned/repository \
+  --json
+```
+
+The `Semantic retrieval evaluation` GitHub Actions workflow runs the same evaluator across all five pinned corpora and publishes each JSON report as an artifact.
 
 ## 1. Same selected files in full
 
