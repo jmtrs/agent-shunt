@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::{Result, bail};
 
@@ -459,17 +462,21 @@ pub fn execute_with_resolver(
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    // Optional semantic pass: fuse the lexical candidates with the dense index's
-    // recall so a chunk that answers the question by meaning — not by sharing its
-    // exact terms — can rise into the budget, including from files the lexical
-    // search never hit. Only the opt-in `--semantic` path supplies hits.
+    // Optional semantic pass: first record the files lexical retrieval would
+    // actually deliver under its own MMR + budget policy. Dense recall may add
+    // missing evidence, but it must not add another region from one of those
+    // already-delivered files and accidentally evict the useful lexical region.
     if !dense_hits.is_empty() {
+        let protected_lexical_paths = select_candidates(&candidates, input)
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect::<BTreeSet<_>>();
         fuse_dense(
             &mut candidates,
             &dense_hits,
             &by_path,
+            &protected_lexical_paths,
             input.budget_tokens,
-            input.min_score_percent,
             input.why,
         );
     }
@@ -481,27 +488,43 @@ pub fn execute_with_resolver(
     if let Some(rerank) = rerank {
         rerank_candidates(rerank, &input.question, &mut candidates)?;
     }
-    // Relevance floor: drop the ranked tail whose score is a small fraction of
-    // the top hit before anything is selected, so weakly-related files never
-    // consume the token budget. `available_count` is captured above, so any
-    // floored chunk still marks the result truncated (evidence was omitted).
+    let selected = select_candidates(&candidates, input);
+    let total_tokens = selected
+        .iter()
+        .map(|candidate| candidate.estimated_tokens)
+        .sum::<usize>();
+
+    let selected_documents = documents_from_chunks(&selected, &loaded.documents);
+    Ok((
+        RetrieveResult {
+            version: 1,
+            query_terms: terms,
+            truncated: selected.len() < available_count,
+            chunks: selected,
+            estimated_tokens: total_tokens,
+            baseline_bytes: loaded.total_bytes,
+        },
+        selected_documents,
+    ))
+}
+
+fn select_candidates(
+    candidates: &[RetrievedChunk],
+    input: &RetrieveInput,
+) -> Vec<RetrievedChunk> {
+    let mut candidates = candidates.to_vec();
+
     let max_score = candidates
         .first()
         .map(|candidate| candidate.score)
         .unwrap_or(0);
     if max_score > 0 {
         candidates.retain(|candidate| {
-            candidate.score.saturating_mul(100) >= max_score.saturating_mul(input.min_score_percent)
+            candidate.score.saturating_mul(100)
+                >= max_score.saturating_mul(input.min_score_percent)
         });
     }
 
-    // Maximal Marginal Relevance ordering: greedily take the chunk that best
-    // trades relevance against redundancy with what is already chosen, so a
-    // second near-identical chunk (boilerplate duplicated across files, or
-    // another hit in an already-represented file) yields its slot to fresh
-    // evidence. Same-path pairs carry a floor similarity, which reproduces the
-    // previous one-per-path-first recall spread — a faintly-ranked expected file
-    // still leads its neighbour's repeats — without a separate pass.
     let token_sets = candidates
         .iter()
         .map(|candidate| content_tokens(&candidate.content))
@@ -518,9 +541,8 @@ pub fn execute_with_resolver(
                 .iter()
                 .map(|&chosen| similarity(candidate, chosen, &candidates, &token_sets))
                 .fold(0.0_f64, f64::max);
-            let value = input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
-            // Strict improvement keeps the earliest (higher-scoring, path-sorted)
-            // candidate on ties, so ordering stays deterministic.
+            let value =
+                input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
             if value > best_value + f64::EPSILON {
                 best_value = value;
                 best_position = position;
@@ -528,20 +550,12 @@ pub fn execute_with_resolver(
         }
         order.push(remaining.remove(best_position));
     }
-    let diverse = order
-        .into_iter()
-        .map(|index| candidates[index].clone())
-        .collect::<Vec<_>>();
-    // Per-file depth cap: past its first (diversity-guaranteed) slot, one file
-    // may contribute at most this many chunks. A file that merely *uses* a
-    // heavily-repeated query term (`credential` scattered across a consumer
-    // module) otherwise takes a dozen slots of budget away from the file that
-    // actually answers the question, even when the budget is not exhausted.
-    // The cap frees that budget; omitted chunks still mark the result truncated.
+
     let mut selected = Vec::new();
     let mut total_tokens = 0;
     let mut per_file: BTreeMap<String, usize> = BTreeMap::new();
-    for candidate in diverse {
+    for index in order {
+        let candidate = &candidates[index];
         let count = per_file.entry(candidate.path.clone()).or_default();
         if *count >= MAX_CHUNKS_PER_FILE {
             continue;
@@ -551,24 +565,12 @@ pub fn execute_with_resolver(
         }
         *count += 1;
         total_tokens += candidate.estimated_tokens;
-        selected.push(candidate);
+        selected.push(candidate.clone());
         if total_tokens >= input.budget_tokens {
             break;
         }
     }
-
-    let selected_documents = documents_from_chunks(&selected, &loaded.documents);
-    Ok((
-        RetrieveResult {
-            version: 1,
-            query_terms: terms,
-            truncated: selected.len() < available_count,
-            chunks: selected,
-            estimated_tokens: total_tokens,
-            baseline_bytes: loaded.total_bytes,
-        },
-        selected_documents,
-    ))
+    selected
 }
 
 // Wiring requires the full adapter set plus input and model chain; collapsing
@@ -624,7 +626,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::{
         application::ports::{ChangeSource, CodeSearch, DocumentLoader},
@@ -889,8 +891,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -938,8 +940,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1001,8 +1003,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1044,8 +1046,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1113,8 +1115,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1174,8 +1176,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1247,8 +1249,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1336,8 +1338,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1412,8 +1414,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
@@ -1476,8 +1478,8 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
+            &BTreeSet::new(),
             10_000,
-            MIN_SCORE_PERCENT,
             false,
         );
 
