@@ -1420,10 +1420,7 @@ mod tests {
             numbered_content: String::new(),
             allowed_ranges: Vec::new(),
         };
-        let by_path = BTreeMap::from([
-            ("c.rs".to_owned(), &c_doc),
-            ("d.rs".to_owned(), &d_doc),
-        ]);
+        let by_path = BTreeMap::from([("c.rs".to_owned(), &c_doc), ("d.rs".to_owned(), &d_doc)]);
         let hits = [
             DenseHit {
                 path: "c.rs".to_owned(),
@@ -1525,12 +1522,18 @@ mod tests {
         let hits = [
             DenseHit {
                 path: "a.rs".to_owned(),
-                range: LineRange { start_line: 1, end_line: 1 },
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
                 similarity: 0.80,
             },
             DenseHit {
                 path: "b.rs".to_owned(),
-                range: LineRange { start_line: 1, end_line: 1 },
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
                 similarity: 0.79,
             },
         ];
@@ -1573,12 +1576,18 @@ mod tests {
         let hits = [
             DenseHit {
                 path: "a.rs".to_owned(),
-                range: LineRange { start_line: 1, end_line: 1 },
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
                 similarity: 0.82,
             },
             DenseHit {
                 path: "b.rs".to_owned(),
-                range: LineRange { start_line: 1, end_line: 1 },
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
                 similarity: 0.78,
             },
         ];
@@ -1629,10 +1638,7 @@ mod tests {
             numbered_content: String::new(),
             allowed_ranges: Vec::new(),
         };
-        let by_path = BTreeMap::from([
-            ("a.rs".to_owned(), &a),
-            ("c.rs".to_owned(), &c_doc),
-        ]);
+        let by_path = BTreeMap::from([("a.rs".to_owned(), &a), ("c.rs".to_owned(), &c_doc)]);
         let hits = [
             DenseHit {
                 path: "a.rs".to_owned(),
@@ -1656,7 +1662,10 @@ mod tests {
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(
-            candidates.iter().filter(|candidate| candidate.path == "a.rs").count(),
+            candidates
+                .iter()
+                .filter(|candidate| candidate.path == "a.rs")
+                .count(),
             1
         );
     }
@@ -1711,10 +1720,7 @@ mod tests {
             numbered_content: String::new(),
             allowed_ranges: Vec::new(),
         };
-        let by_path = BTreeMap::from([
-            ("a.rs".to_owned(), &a),
-            ("c.rs".to_owned(), &c_doc),
-        ]);
+        let by_path = BTreeMap::from([("a.rs".to_owned(), &a), ("c.rs".to_owned(), &c_doc)]);
         let hits = [
             DenseHit {
                 path: "a.rs".to_owned(),
@@ -1775,12 +1781,18 @@ mod tests {
         let hits = [
             DenseHit {
                 path: "a.rs".to_owned(),
-                range: LineRange { start_line: 5, end_line: 10 },
+                range: LineRange {
+                    start_line: 5,
+                    end_line: 10,
+                },
                 similarity: 0.90,
             },
             DenseHit {
                 path: "b.rs".to_owned(),
-                range: LineRange { start_line: 1, end_line: 1 },
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
                 similarity: 0.80,
             },
         ];
