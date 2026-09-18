@@ -193,6 +193,8 @@ struct CaseResult {
     agent_vs_rg_top5_reduction_pct: f64,
     rg_matched_files: usize,
     rg_top5_files: Vec<String>,
+    agent_files: Vec<String>,
+    production_search_top_files: Vec<String>,
 }
 
 fn main() -> Result<ExitCode> {
@@ -286,6 +288,17 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
         );
 
         let agent_files = distinct_chunk_paths(&agent.chunks);
+        let production_hits = search.search(
+            root,
+            &case.question,
+            corpus.max_hits,
+            &corpus.globs,
+        )?;
+        let production_search_top_files = production_hits
+            .iter()
+            .take(12)
+            .map(|hit| format!("{}@{}", hit.path, hit.score))
+            .collect::<Vec<_>>();
         let terms = search.terms(&case.question);
         let rg = raw_rg_ranking(root, &terms, &corpus.globs)
             .with_context(|| format!("plain ripgrep baseline failed case {}", case.id))?;
@@ -340,6 +353,8 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
             agent_vs_rg_top5_reduction_pct: reduction_pct(agent.estimated_tokens, rg_top5_tokens),
             rg_matched_files: rg.files.len(),
             rg_top5_files: rg_top5,
+            agent_files,
+            production_search_top_files,
         });
     }
 
