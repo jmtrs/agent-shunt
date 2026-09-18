@@ -31,10 +31,9 @@ fn confident_dense_head_path(hits: &[DenseHit]) -> Option<&str> {
 /// existing lexical scores are never rewritten and dense evidence can never
 /// tie or outrank the strongest lexical candidate.
 ///
-/// Only one non-overlapping dense region is admitted, and only when that file
-/// is not already represented at or above the lexical score tier dense would
-/// receive. Semantic recall may strengthen a weakly represented file, but it
-/// must not spend budget deepening a file that is already strong lexically.
+/// Only one non-overlapping dense region is admitted, and only from a file the
+/// lexical candidate set does not already represent. Semantic recall widens
+/// file recall; it never spends budget deepening an already-found lexical file.
 pub(super) fn fuse_dense(
     candidates: &mut Vec<RetrievedChunk>,
     hits: &[DenseHit],
@@ -82,32 +81,25 @@ pub(super) fn fuse_dense(
         return;
     };
 
-    // Dense recall is an escape hatch for the weak lexical tail, not a
-    // promotion mechanism. Keep every existing lexical candidate ahead on raw
-    // relevance score; MMR may still select the dense region earlier when its
-    // diversity is worth more than another redundant lexical chunk.
+    // Semantic recall is a cross-file recall channel, not a way to deepen a
+    // file lexical search already found. A second region from the same file can
+    // consume budget and evict the lexical region that actually matched the
+    // question, even when the dense region is semantically related.
+    if candidates
+        .iter()
+        .any(|candidate| candidate.path == dense_head_path)
+    {
+        return;
+    }
+
+    // For a genuinely novel file, let dense evidence compete with the lexical
+    // head without ever tying or outranking #1. MMR and the shared token budget
+    // still decide whether the novel region is worth keeping.
     let second_score = candidates
         .get(1)
         .map(|candidate| candidate.score)
         .unwrap_or(top_score);
-    let tail_score = candidates
-        .last()
-        .map(|candidate| candidate.score)
-        .unwrap_or(top_score);
-    let dense_score = tail_score
-        .saturating_sub(1)
-        .min(top_score.saturating_sub(1));
-
-    // A file already represented at the strong lexical tier does not need more
-    // depth from semantic recall. A weak lexical representation may still gain
-    // a different dense region, but that new region remains below the lexical
-    // tail on raw score and must earn selection through diversity.
-    if candidates
-        .iter()
-        .any(|candidate| candidate.path == dense_head_path && candidate.score >= second_score)
-    {
-        return;
-    }
+    let dense_score = second_score.min(top_score.saturating_sub(1));
 
     // Dense hits arrive sorted by descending similarity. Only the confident
     // head file may contribute a region; falling through to a lower-ranked
