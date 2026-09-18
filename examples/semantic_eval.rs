@@ -89,6 +89,28 @@ struct CaseResult {
     delivered_tokens: usize,
     chunks: usize,
     latency_ms: f64,
+    ranking: Vec<EvalChunk>,
+    dense_head: Vec<EvalDenseHit>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvalChunk {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    score: usize,
+    estimated_tokens: usize,
+    source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvalDenseHit {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    similarity: f32,
 }
 
 fn main() -> Result<ExitCode> {
@@ -275,6 +297,27 @@ fn run_strategy(
     let mut results = Vec::with_capacity(corpus.cases.len());
 
     for case in &corpus.cases {
+        // Keep enough raw dense provenance in the artifact to explain why a
+        // semantic run changed a lexical result. This diagnostic recall is
+        // outside the timed region and does not affect the production call.
+        let dense_head = if let Some(index) = index {
+            index
+                .recall(&case.question, root, &corpus.globs, &Limits::default())
+                .with_context(|| format!("dense diagnostic failed case {}", case.id))?
+                .hits
+                .into_iter()
+                .take(3)
+                .map(|hit| EvalDenseHit {
+                    path: hit.path,
+                    start_line: hit.range.start_line,
+                    end_line: hit.range.end_line,
+                    similarity: hit.similarity,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let started = Instant::now();
         let (result, _) = execute_with_resolver(
             &RipgrepSearch,
@@ -296,7 +339,7 @@ fn run_strategy(
                 mmr_lambda: MMR_LAMBDA,
                 max_block_lines: MAX_BLOCK_LINES,
                 min_score_percent: MIN_SCORE_PERCENT,
-                why: false,
+                why: true,
                 prf: false,
                 review: false,
             },
@@ -309,6 +352,19 @@ fn run_strategy(
             delivered_tokens: result.estimated_tokens,
             chunks: result.chunks.len(),
             latency_ms: duration_ms(started.elapsed()),
+            ranking: result
+                .chunks
+                .iter()
+                .map(|chunk| EvalChunk {
+                    path: chunk.path.clone(),
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    score: chunk.score,
+                    estimated_tokens: chunk.estimated_tokens,
+                    source: chunk.source.clone(),
+                })
+                .collect(),
+            dense_head,
         });
     }
 
