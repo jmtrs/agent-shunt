@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "date": "2026-09-18",
+  "benchmark": "semantic-retrieval-v1",
+  "cases": 50,
+  "repositories": 5,
+  "languages": [
+    "Rust",
+    "Python",
+    "TypeScript",
+    "Go",
+    "Java"
+  ],
+  "budgetTokens": 1200,
+  "embedding": {
+    "provider": "local",
+    "model": "bge-small-en-v1.5",
+    "indexTopK": 24,
+    "localBatchSize": 32
+  },
+  "validationRuns": {
+    "flaskHonoCobra": 35325175962,
+    "gson": 35325177443,
+    "ripgrep": 35325527573
+  },
+  "aggregate": {
+    "lexical": {
+      "hitAt": {
+        "1": 0.5,
+        "3": 0.74,
+        "5": 0.78
+      },
+      "mrr": 0.6023333333333334,
+      "avgTokens": 1036.7
+    },
+    "semantic": {
+      "hitAt": {
+        "1": 0.5,
+        "3": 0.84,
+        "5": 0.88
+      },
+      "mrr": 0.6623333333333333,
+      "avgTokens": 1052.12
+    }
+  },
+  "corpora": {
+    "ripgrep": {
+      "language": "Rust",
+      "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "runId": 35325527573,
+      "lexical": {
+        "hitAt": {
+          "1": 0.4,
+          "3": 0.8,
+          "5": 0.9
+        },
+        "mrr": 0.5866666666666667,
+        "avgTokens": 1006.6
+      },
+      "semantic": {
+        "hitAt": {
+          "1": 0.4,
+          "3": 0.7,
+          "5": 0.9
+        },
+        "mrr": 0.595,
+        "avgTokens": 1052.8
+      }
+    },
+    "flask": {
+      "language": "Python",
+      "commit": "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35",
+      "runId": 35325175962,
+      "lexical": {
+        "hitAt": {
+          "1": 0.6,
+          "3": 0.7,
+          "5": 0.7
+        },
+        "mrr": 0.6333333333333333,
+        "avgTokens": 1141.5
+      },
+      "semantic": {
+        "hitAt": {
+          "1": 0.6,
+          "3": 0.9,
+          "5": 0.9
+        },
+        "mrr": 0.75,
+        "avgTokens": 1129.5
+      }
+    },
+    "hono": {
+      "language": "TypeScript",
+      "commit": "098e11912ab244c5c33931de007f04dc8e3c2929",
+      "runId": 35325175962,
+      "lexical": {
+        "hitAt": {
+          "1": 0.3,
+          "3": 0.6,
+          "5": 0.6
+        },
+        "mrr": 0.41666666666666663,
+        "avgTokens": 997.3
+      },
+      "semantic": {
+        "hitAt": {
+          "1": 0.3,
+          "3": 0.8,
+          "5": 0.8
+        },
+        "mrr": 0.5,
+        "avgTokens": 982.9
+      }
+    },
+    "cobra": {
+      "language": "Go",
+      "commit": "adbc8813901bba65827259daa8e22ff94ec1f30e",
+      "runId": 35325175962,
+      "lexical": {
+        "hitAt": {
+          "1": 0.9,
+          "3": 0.9,
+          "5": 1
+        },
+        "mrr": 0.925,
+        "avgTokens": 1103.9
+      },
+      "semantic": {
+        "hitAt": {
+          "1": 0.9,
+          "3": 1,
+          "5": 1
+        },
+        "mrr": 0.95,
+        "avgTokens": 1117.5
+      }
+    },
+    "gson": {
+      "language": "Java",
+      "commit": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
+      "runId": 35325177443,
+      "lexical": {
+        "hitAt": {
+          "1": 0.3,
+          "3": 0.7,
+          "5": 0.7
+        },
+        "mrr": 0.45,
+        "avgTokens": 934.2
+      },
+      "semantic": {
+        "hitAt": {
+          "1": 0.3,
+          "3": 0.8,
+          "5": 0.8
+        },
+        "mrr": 0.5166666666666666,
+        "avgTokens": 977.9
+      }
+    }
+  },
+  "knownTradeoff": {
+    "corpus": "ripgrep",
+    "description": "Hit@3 decreases from 0.80 to 0.70 while Hit@5 stays 0.90 and MRR increases from 0.587 to 0.595. gitignore-matching moves rank 3 to 4; file-type-globs moves rank 3 to 2."
+  },
+  "caveats": [
+    "Hit@K and MRR measure retrieval quality, not final LLM answer correctness.",
+    "Token counts use agent-shunt's conservative context estimator, not a provider billing tokenizer.",
+    "Latency is runner-dependent and is not used as a quality gate.",
+    "Semantic retrieval is opt-in; the default lexical retrieve path remains local, keyless, and provider-free."
+  ]
+}
