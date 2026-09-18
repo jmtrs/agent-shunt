@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::{DenseHit, Document, RetrievedChunk};
 
@@ -39,8 +39,8 @@ pub(super) fn fuse_dense(
     candidates: &mut Vec<RetrievedChunk>,
     hits: &[DenseHit],
     by_path: &BTreeMap<String, &Document>,
+    protected_lexical_paths: &BTreeSet<String>,
     budget: usize,
-    min_score_percent: usize,
     why: bool,
 ) {
     // When lexical retrieval found nothing, semantic recall is the only evidence
@@ -83,16 +83,11 @@ pub(super) fn fuse_dense(
         return;
     };
 
-    // Semantic recall is for evidence lexical retrieval would otherwise lose.
-    // A same-file lexical candidate only blocks dense depth when it is strong
-    // enough to survive the relevance floor. Very weak lexical matches are
-    // effectively absent after pruning, so semantic recall may still rescue
-    // that file.
-    if candidates.iter().any(|candidate| {
-        candidate.path == dense_head_path
-            && candidate.score.saturating_mul(100)
-                >= top_score.saturating_mul(min_score_percent)
-    }) {
+    // Semantic recall is for evidence lexical retrieval would otherwise omit.
+    // Protect files that the lexical-only MMR + budget selection would actually
+    // deliver. A weak candidate that never reaches the lexical result does not
+    // block semantic rescue merely because it exists in the intermediate pool.
+    if protected_lexical_paths.contains(dense_head_path) {
         return;
     }
 
