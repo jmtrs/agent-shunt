@@ -619,6 +619,16 @@ pub fn execute_analyzed(
     Ok((result, bytes, fallback))
 }
 
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    use anyhow::Result;
+
+    use std::collections::BTreeMap;
 
     use crate::{
         application::ports::{ChangeSource, CodeSearch, DocumentLoader},

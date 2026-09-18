@@ -162,13 +162,3 @@ pub(super) fn hit_in_changed_lines(hit: &crate::domain::SearchHit, change: &File
         })
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        sync::Mutex,
-    };
-
-    use anyhow::Result;
-
-    use std::collections::BTreeMap;
