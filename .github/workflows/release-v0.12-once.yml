@@ -1,37 +1,37 @@
-name: Publish v0.12.0 once
+name: Publish v0.12.0
 
 on:
   push:
     branches: [main]
+    paths:
+      - .github/workflows/release-v0.12-once.yml
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: github.event.head_commit.message != 'chore: remove v0.12 release workflow'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: Publish v0.12.0 if missing
+      - name: Verify package version
+        run: grep -q '^version = "0.12.0"$' Cargo.toml
+
+      - name: Publish v0.12.0
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if git rev-parse "v0.12.0" >/dev/null 2>&1 || gh release view "v0.12.0" >/dev/null 2>&1; then
-            echo "v0.12.0 already exists"
+          if gh release view v0.12.0 >/dev/null 2>&1; then
+            echo "v0.12.0 already exists; nothing to do."
             exit 0
           fi
 
-          gh release create "v0.12.0" \
-            --target "$GITHUB_SHA" \
-            --title "v0.12.0 - confidence-gated semantic retrieval" \
-            --notes-file - <<'EOF'
-          ## v0.12.0
+          cat > /tmp/release-notes.md <<'EOF'
+          ## Confidence-gated semantic retrieval
 
-          Semantic retrieval is now a bounded complement to lexical retrieval instead of an equal-authority ranking.
+          v0.12.0 makes semantic retrieval a bounded complement to lexical retrieval instead of an equal-authority ranking.
 
           ### Retrieval quality
 
@@ -42,9 +42,9 @@ jobs:
           | lexical | 50% | 74% | 78% | 0.602 |
           | local semantic | 50% | 84% | 88% | 0.662 |
 
-          Aggregate Hit@1 is unchanged. Semantic retrieval adds 10 percentage points at Hit@3 and Hit@5 and improves MRR by about 0.060.
+          Aggregate Hit@1 is unchanged. Semantic retrieval adds 10 percentage points at Hit@3 and Hit@5 and improves MRR by about 0.060. Average delivered context rises only from about 1,037 to 1,052 estimated tokens per query.
 
-          The per-repository results are published rather than hidden: ripgrep Hit@3 moves from 80% to 70%, while Hit@5 remains 90% and MRR improves slightly from 0.587 to 0.595.
+          The per-repository results remain visible: on ripgrep, Hit@3 moves from 80% to 70%, while Hit@5 remains 90% and MRR improves slightly from 0.587 to 0.595.
 
           ### What changed
 
@@ -55,9 +55,14 @@ jobs:
           - Prevents semantic fall-through when the validated head cannot contribute.
           - Fixed cross-file overlap handling in dense-region admission.
           - Bounded local FastEmbed inference to batches of 32 for robust indexing of large source files.
-          - Added a reproducible semantic evaluator and GitHub Actions workflow.
+          - Added a reproducible semantic evaluator, workflow, and machine-readable benchmark snapshot.
 
           Context-savings claims from v0.11.0 remain separate: they measure lexical source-context efficiency, not provider billing or LLM cost.
 
-          See `eval/RESULTS.md` for methodology, caveats, pinned commits, and reproduction commands.
+          Full methodology, caveats, pinned commits, run IDs, and machine-readable data live in [`eval/RESULTS.md`](https://github.com/jmtrs/agent-shunt/blob/main/eval/RESULTS.md) and [`eval/results/2026-09-18-semantic.json`](https://github.com/jmtrs/agent-shunt/blob/main/eval/results/2026-09-18-semantic.json).
           EOF
+
+          gh release create v0.12.0 \
+            --target "$GITHUB_SHA" \
+            --title "v0.12.0 - confidence-gated semantic retrieval" \
+            --notes-file /tmp/release-notes.md
