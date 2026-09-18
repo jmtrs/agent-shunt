@@ -781,9 +781,10 @@ fn confident_dense_head_path(hits: &[DenseHit]) -> Option<&str> {
 /// existing lexical scores are never rewritten and dense evidence can never
 /// tie or outrank the strongest lexical candidate.
 ///
-/// Only one non-overlapping dense region is admitted. This is deliberate: the
-/// downstream relevance floor, MMR, and token budget can then trade that region
-/// against weak lexical evidence without semantic recall flooding the context.
+/// Only one non-overlapping dense region is admitted, and only when that file
+/// is not already represented at or above the lexical score tier dense would
+/// receive. Semantic recall may strengthen a weakly represented file, but it
+/// must not spend budget deepening a file that is already strong lexically.
 fn fuse_dense(
     candidates: &mut Vec<RetrievedChunk>,
     hits: &[DenseHit],
@@ -835,6 +836,18 @@ fn fuse_dense(
         .get(1)
         .map(|candidate| candidate.score)
         .unwrap_or(top_score);
+
+    // Semantic recall is a side-channel for evidence that lexical retrieval is
+    // missing or underweighting. If the same file already has evidence at the
+    // score tier dense would receive, another region from that file is depth,
+    // not recall, and can only evict other strong lexical evidence.
+    if candidates
+        .iter()
+        .any(|candidate| candidate.path == dense_head_path && candidate.score >= second_score)
+    {
+        return;
+    }
+
     let dense_score = second_score.min(top_score - 1);
 
     // Dense hits arrive sorted by descending similarity. Only the confident
@@ -1574,6 +1587,160 @@ mod tests {
 
         assert!(candidates.iter().any(|candidate| candidate.path == "a.rs"));
         assert!(!candidates.iter().any(|candidate| candidate.path == "b.rs"));
+    }
+
+    #[test]
+    fn dense_fusion_does_not_deepen_a_lexically_strong_file() {
+        let mut candidates = vec![
+            RetrievedChunk {
+                path: "a.rs".to_owned(),
+                start_line: 1,
+                end_line: 2,
+                score: 100,
+                estimated_tokens: 10,
+                content: "strong lexical a".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+            RetrievedChunk {
+                path: "b.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score: 80,
+                estimated_tokens: 10,
+                content: "lexical b".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+        ];
+        let a = Document {
+            path: "a.rs".to_owned(),
+            bytes: 60,
+            line_count: 20,
+            lines: (1..=20).map(|line| format!("a {line}")).collect(),
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let c_doc = Document {
+            path: "c.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense c".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([
+            ("a.rs".to_owned(), &a),
+            ("c.rs".to_owned(), &c_doc),
+        ]);
+        let hits = [
+            DenseHit {
+                path: "a.rs".to_owned(),
+                range: LineRange {
+                    start_line: 10,
+                    end_line: 12,
+                },
+                similarity: 0.90,
+            },
+            DenseHit {
+                path: "c.rs".to_owned(),
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
+                similarity: 0.80,
+            },
+        ];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates.iter().filter(|candidate| candidate.path == "a.rs").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dense_fusion_can_strengthen_a_lexically_weak_file() {
+        let mut candidates = vec![
+            RetrievedChunk {
+                path: "head.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score: 100,
+                estimated_tokens: 10,
+                content: "head".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+            RetrievedChunk {
+                path: "second.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score: 80,
+                estimated_tokens: 10,
+                content: "second".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+            RetrievedChunk {
+                path: "a.rs".to_owned(),
+                start_line: 1,
+                end_line: 2,
+                score: 40,
+                estimated_tokens: 10,
+                content: "weak lexical a".to_owned(),
+                source: None,
+                matched_terms: None,
+            },
+        ];
+        let a = Document {
+            path: "a.rs".to_owned(),
+            bytes: 60,
+            line_count: 20,
+            lines: (1..=20).map(|line| format!("a {line}")).collect(),
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let c_doc = Document {
+            path: "c.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense c".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([
+            ("a.rs".to_owned(), &a),
+            ("c.rs".to_owned(), &c_doc),
+        ]);
+        let hits = [
+            DenseHit {
+                path: "a.rs".to_owned(),
+                range: LineRange {
+                    start_line: 10,
+                    end_line: 12,
+                },
+                similarity: 0.90,
+            },
+            DenseHit {
+                path: "c.rs".to_owned(),
+                range: LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                },
+                similarity: 0.80,
+            },
+        ];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        let dense = candidates
+            .iter()
+            .find(|candidate| candidate.path == "a.rs" && candidate.start_line == 10)
+            .expect("weakly represented file should receive semantic recall");
+        assert_eq!(dense.score, 80);
     }
 
     #[test]
