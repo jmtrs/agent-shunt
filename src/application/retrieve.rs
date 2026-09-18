@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_fusion_can_strengthen_a_lexically_weak_file() {
+    fn dense_fusion_does_not_deepen_a_lexically_weak_file() {
         let mut candidates = vec![
             RetrievedChunk {
                 path: "head.rs".to_owned(),
@@ -1284,11 +1284,19 @@ mod tests {
 
         fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
 
-        let dense = candidates
-            .iter()
-            .find(|candidate| candidate.path == "a.rs" && candidate.start_line == 10)
-            .expect("weakly represented file should receive semantic recall");
-        assert_eq!(dense.score, 80);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.path == "a.rs")
+                .count(),
+            1,
+            "semantic recall must not add another region from a lexically represented file"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !(candidate.path == "a.rs" && candidate.start_line == 10))
+        );
     }
 
     #[test]
