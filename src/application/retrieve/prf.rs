@@ -119,4 +119,3 @@ pub(super) fn is_compound_identifier(token: &str) -> bool {
         .any(|pair| (pair[0].is_lowercase() || pair[0].is_ascii_digit()) && pair[1].is_uppercase())
 }
 
-/// The query terms a coverage mask names: bit `i` corresponds to `terms[i]`.

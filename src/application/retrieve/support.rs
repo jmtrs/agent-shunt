@@ -4,6 +4,7 @@ use crate::domain::{Document, FileChange, LineRange, RetrievedChunk};
 
 use super::{ENVELOPE_TOKENS_PER_CHUNK, SAME_PATH_SIM};
 
+/// The query terms a coverage mask names: bit `i` corresponds to `terms[i]`.
 pub(super) fn decode_terms(mask: u16, terms: &[String]) -> Vec<String> {
     (0..terms.len())
         .filter(|index| mask & (1 << index) != 0)
