@@ -28,7 +28,17 @@ A reproducible external benchmark uses **50 human-authored architecture and impl
 
 At file level, agent-shunt reached **78% File-Hit@5 and 0.611 MRR**, versus **74% File-Hit@5 and 0.489 MRR** for the disclosed `rg + whole-file reads` baseline. The comparison is not cherry-picked: the published per-repository table also shows the corpora where plain `rg` wins a metric.
 
-These are **estimated source-context tokens**, not provider billing tokens or measured API cost. Repositories, commits, evaluator code, CI runs, caveats, and the machine-readable snapshot are public in [`eval/RESULTS.md`](eval/RESULTS.md) and [`eval/results/2026-09-17.json`](eval/results/2026-09-17.json).
+A harder same-budget comparison avoids giving `rg` an artificially expensive whole-file workflow. Plain `rg` ranks matching files, then targeted reads are interleaved across those files until the same 1,200-token ceiling is reached:
+
+| Strategy | Hit@1 | Hit@3 | Hit@5 | MRR | Avg. context/query |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `agent-shunt` lexical | **50%** | **74%** | **78%** | **0.602** | **1,036.7** |
+| `rg + fixed window` | 26% | 64% | 72% | 0.446 | 1,167.4 |
+| `rg + enclosing symbol` | 26% | 64% | 72% | 0.445 | 1,171.8 |
+
+This comparison is intentionally less flattering and more realistic. On Hono, both targeted `rg` variants reach **90% Hit@5** versus **60%** for agent-shunt. Aggregate results still favor agent-shunt, but this remains a deterministic retrieval benchmark, not a claim that agent-shunt outperforms full coding agents.
+
+These are **estimated source-context tokens**, not provider billing tokens or measured API cost. Repositories, commits, evaluator code, CI runs, caveats, and machine-readable snapshots are public in [`eval/RESULTS.md`](eval/RESULTS.md), [`eval/results/2026-09-17.json`](eval/results/2026-09-17.json), and [`eval/results/2026-09-18-targeted-rg.json`](eval/results/2026-09-18-targeted-rg.json).
 
 ### Semantic retrieval quality
 
