@@ -520,18 +520,43 @@ fn raw_rg_ranking(root: &Path, terms: &[String], globs: &[String]) -> Result<RgR
         .iter()
         .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
-    let file_rank = files
-        .iter()
-        .enumerate()
-        .map(|(rank, path)| (path.as_str(), rank))
-        .collect::<HashMap<_, _>>();
-    hits.sort_by(|left, right| {
-        file_rank[&left.path.as_str()]
-            .cmp(&file_rank[&right.path.as_str()])
-            .then_with(|| right.matched_terms.cmp(&left.matched_terms))
-            .then_with(|| left.line.cmp(&right.line))
-    });
-    hits.dedup_by(|left, right| left.path == right.path && left.line == right.line);
+    // A targeted navigator should not exhaust the evidence budget inside the
+    // first high-scoring file. Rank hits within each file, then interleave by
+    // file rank: best hit from every ranked file first, second-best hit next,
+    // and so on. This is a deliberately stronger baseline than blindly
+    // consuming ripgrep output in path order or drilling into one file.
+    let mut hits_by_file = HashMap::<String, Vec<RgHit>>::new();
+    for hit in hits {
+        hits_by_file.entry(hit.path.clone()).or_default().push(hit);
+    }
+    for file_hits in hits_by_file.values_mut() {
+        file_hits.sort_by(|left, right| {
+            right
+                .matched_terms
+                .cmp(&left.matched_terms)
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        file_hits.dedup_by(|left, right| left.line == right.line);
+    }
+
+    let mut hits = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        let mut added = false;
+        for path in &files {
+            if let Some(hit) = hits_by_file
+                .get(path)
+                .and_then(|file_hits| file_hits.get(depth))
+            {
+                hits.push(hit.clone());
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+        depth += 1;
+    }
 
     Ok(RgRanking { files, hits })
 }
