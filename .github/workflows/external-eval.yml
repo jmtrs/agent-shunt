@@ -14,6 +14,10 @@ on:
       - "src/adapters/tree_sitter_chunker.rs"
       - ".github/workflows/external-eval.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
