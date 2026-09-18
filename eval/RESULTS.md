@@ -15,17 +15,17 @@ All token counts below are **estimated context tokens**, not provider billing to
 
 ## Headline
 
-Across the current 50-case corpus, `agent-shunt` delivered **51,445 estimated context tokens**.
+Across the current 50-case corpus, `agent-shunt` delivered **51,304 estimated context tokens**.
 
-Against reading the exact same selected files in full, the baseline required **921,117** estimated tokens. That is an aggregate **94.41% context reduction**, or **17.90x less context**.
+Against reading the exact same selected files in full, the baseline required **910,748** estimated tokens. That is an aggregate **94.37% context reduction**, or **17.75x less context**.
 
 Against the operational `rg + whole-file reads` baseline:
 
 | Comparison | agent-shunt context | Baseline context | Reduction | Compression |
 | --- | ---: | ---: | ---: | ---: |
-| `rg` top 1 file in full | 51,445 | 634,107 | **91.89%** | **12.33x** |
-| `rg` top 3 files in full | 51,445 | 1,608,472 | **96.80%** | **31.27x** |
-| `rg` top 5 files in full | 51,445 | 2,465,142 | **97.91%** | **47.92x** |
+| `rg` top 1 file in full | 51,304 | 634,107 | **91.91%** | **12.36x** |
+| `rg` top 3 files in full | 51,304 | 1,608,472 | **96.81%** | **31.35x** |
+| `rg` top 5 files in full | 51,304 | 2,465,142 | **97.92%** | **48.05x** |
 
 The file-level retrieval comparison is:
 
@@ -38,32 +38,28 @@ Chunk-level lexical quality is **Hit@1 50%**, **Hit@3 76%**, **Hit@5 84%**, and 
 
 ## Budgeted targeted-navigation baseline
 
-The whole-file baseline measures context compression, but a competent repository-navigation workflow usually does not open every matching file in full. The stronger deterministic comparison therefore keeps plain `rg` for discovery and gives it the **same 1,200-token context budget** as `agent-shunt`.
-
-To make this baseline harder to beat, targeted reads are **interleaved by ranked file**: the best hit from each ranked file is considered before taking a second hit from any file.
+The stronger deterministic comparison keeps plain `rg` for discovery and gives it the **same 1,200-token context budget** as `agent-shunt`.
 
 | Repository | agent Hit@5 | agent MRR | agent tokens | `rg + window` Hit@5 | window MRR | window tokens | `rg + symbol` Hit@5 | symbol MRR | symbol tokens |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | ripgrep | **90%** | **0.587** | **10,066** | 40% | 0.220 | 11,761 | 40% | 0.220 | 11,767 |
-| Flask | **70%** | **0.633** | **11,415** | 60% | 0.400 | 11,683 | **70%** | 0.420 | 11,673 |
-| Hono | **90%** | **0.500** | **9,583** | **90%** | **0.500** | 11,737 | **90%** | **0.500** | 11,703 |
-| Cobra | **100%** | **0.925** | **11,039** | **100%** | 0.717 | 11,604 | **100%** | 0.717 | 11,675 |
-| Gson | **70%** | **0.450** | **9,342** | **70%** | 0.392 | 11,587 | 60% | 0.367 | 11,772 |
-| **Aggregate, 50 cases** | **84%** | **0.619** | **51,445** | 72% | 0.446 | 58,372 | 72% | 0.445 | 58,590 |
-
-At the same nominal context ceiling:
+| Flask | **70%** | **0.633** | **11,377** | 60% | 0.400 | 11,683 | **70%** | 0.420 | 11,673 |
+| Hono | **90%** | **0.500** | **9,571** | **90%** | **0.500** | 11,737 | **90%** | **0.500** | 11,703 |
+| Cobra | **100%** | **0.925** | **11,007** | **100%** | 0.717 | 11,604 | **100%** | 0.717 | 11,675 |
+| Gson | **70%** | **0.450** | **9,283** | **70%** | 0.392 | 11,587 | 60% | 0.367 | 11,772 |
+| **Aggregate, 50 cases** | **84%** | **0.619** | **51,304** | 72% | 0.446 | 58,372 | 72% | 0.445 | 58,590 |
 
 | Strategy | Hit@1 | Hit@3 | Hit@5 | MRR | Avg. context/query |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `agent-shunt` lexical | **50%** | **76%** | **84%** | **0.619** | **1,028.9** |
+| `agent-shunt` lexical | **50%** | **76%** | **84%** | **0.619** | **1,026.1** |
 | `rg + window` | 26% | 64% | 72% | 0.446 | 1,167.4 |
 | `rg + symbol` | 26% | 64% | 72% | 0.445 | 1,171.8 |
 
-The stronger baseline narrows the comparison without relying on wasteful whole-file reads. Aggregate Hit@5 is **84% vs 72%**, MRR is **0.619 vs 0.446/0.445**, and agent-shunt delivers about 12% less estimated context. Hono is now a tie at 90% Hit@5 / 0.500 MRR, rather than a targeted-`rg` win.
+Budget-aware MMR slightly reduces delivered lexical context without changing aggregate Hit@K/MRR. Hono remains a tie with both targeted `rg` variants at 90% Hit@5 / 0.500 MRR.
 
-This still does **not** prove superiority to a coding agent. A real agent may reformulate queries, follow references, use an LSP, inspect repository maps, or perform multiple adaptive search/read rounds.
+This remains a deterministic retrieval benchmark, not a claim that agent-shunt outperforms full coding agents.
 
-The machine-readable snapshot is [`eval/results/2026-09-18-targeted-rg.json`](results/2026-09-18-targeted-rg.json), validated by workflow run `35335856826`.
+The machine-readable snapshot is [`eval/results/2026-09-18-targeted-rg.json`](results/2026-09-18-targeted-rg.json), validated by workflow run `35340803415`.
 
 ## Semantic retrieval quality
 
@@ -73,35 +69,33 @@ The opt-in local semantic path uses the production confidence-gated fusion polic
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | ripgrep | 40% | **80%** | 90% | 0.587 | 40% | 70% | 90% | **0.595** |
 | Flask | 60% | 70% | 70% | 0.633 | 60% | **90%** | **90%** | **0.750** |
-| Hono | 30% | **70%** | **90%** | **0.500** | 30% | 70% | 80% | 0.475 |
+| Hono | 30% | 70% | 90% | 0.500 | 30% | 70% | 90% | 0.500 |
 | Cobra | 90% | 90% | 100% | 0.925 | 90% | **100%** | 100% | **0.950** |
 | Gson | 30% | 70% | 70% | 0.450 | 30% | **80%** | **80%** | **0.517** |
-| **Aggregate, 50 cases** | **50%** | 76% | 84% | 0.619 | **50%** | **82%** | **88%** | **0.657** |
+| **Aggregate, 50 cases** | **50%** | 76% | 84% | 0.619 | **50%** | **82%** | **90%** | **0.662** |
 
-Aggregate Hit@1 is unchanged. Semantic retrieval adds **6 percentage points at Hit@3**, **4 at Hit@5**, and improves MRR by about **0.038**. Average delivered context is **1,050.6 estimated tokens/query** versus **1,028.9** for lexical retrieval.
+Aggregate Hit@1 is unchanged. Semantic retrieval adds **6 percentage points at Hit@3**, **6 at Hit@5**, and improves MRR by about **0.043**. Average delivered context is **1,047.8 estimated tokens/query** versus **1,026.1** for lexical retrieval.
 
-The result is not a universal win. On ripgrep, semantic Hit@3 falls from 80% to 70% while Hit@5 stays 90%. On Hono, the improved lexical ranking now outperforms semantic fusion: **90% vs 80% Hit@5** and **0.500 vs 0.475 MRR**. Those regressions are kept visible and motivate a separate semantic-fusion change rather than weakening the lexical fix.
+Budget-aware MMR fixes the previous Hono regression without a semantic-specific heuristic: a candidate that cannot fit the remaining token budget is no longer allowed to create redundancy against candidates that can actually be delivered. Hono therefore stays at **90% Hit@5 / 0.500 MRR** for both lexical and semantic retrieval.
 
-The production policy remains bounded: lexical #1 stays authoritative, at most one semantic region is admitted, the leading semantic file must clear a confidence margin, and all evidence competes under the same token budget.
+The known trade-off remains on ripgrep: semantic Hit@3 falls from 80% to 70% while Hit@5 stays 90% and MRR rises slightly from 0.587 to 0.595.
 
-The semantic workflow now runs on retrieval/ranking PRs, caches per-corpus vectors, and validates all five pinned corpora. Final validation: workflow run `35336476560`.
+Final semantic validation: workflow run `35340803578`.
 
 The machine-readable summary is [`eval/results/2026-09-18-semantic.json`](results/2026-09-18-semantic.json).
 
 ## 1. Same selected files in full
 
-This comparison gives the baseline perfect file selection for free: it reads the distinct files that actually contributed chunks selected by `agent-shunt`.
-
 | Repository | Language | Commit | Chunk Hit@1 | Hit@3 | Hit@5 | Chunk MRR | Delivered tokens | Same files in full | Reduction | Compression | Median case reduction | p95 delivered | p95 full files |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | ripgrep | Rust | `3fce3b5bb023` | 40% | 80% | 90% | 0.587 | 10,066 | 406,114 | **97.5%** | **40.35x** | 97.0% | 1,200 | 117,616 |
-| Flask | Python | `d73fa1cdcbd8` | 60% | 70% | 70% | 0.633 | 11,415 | 149,620 | **92.4%** | **13.11x** | 89.1% | 1,189 | 36,171 |
-| Hono | TypeScript | `098e11912ab2` | 30% | 70% | 90% | 0.500 | 9,583 | 102,486 | **90.6%** | **10.69x** | 88.4% | 1,195 | 31,702 |
-| Cobra | Go | `adbc8813901b` | 90% | 90% | 100% | 0.925 | 11,039 | 123,636 | **91.1%** | **11.20x** | 81.6% | 1,191 | 32,260 |
-| Gson | Java | `854c8255b625` | 30% | 70% | 70% | 0.450 | 9,342 | 139,261 | **93.3%** | **14.91x** | 92.4% | 1,189 | 36,941 |
-| **Aggregate, 50 cases** | 5 languages | pinned below | **50%** | **76%** | **84%** | **0.619** | **51,445** | **921,117** | **94.41%** | **17.90x** | n/a | n/a | n/a |
+| Flask | Python | `d73fa1cdcbd8` | 60% | 70% | 70% | 0.633 | 11,377 | 145,653 | **92.2%** | **12.80x** | 89.1% | 1,189 | 36,171 |
+| Hono | TypeScript | `098e11912ab2` | 30% | 70% | 90% | 0.500 | 9,571 | 103,240 | **90.7%** | **10.79x** | 88.5% | 1,195 | 31,702 |
+| Cobra | Go | `adbc8813901b` | 90% | 90% | 100% | 0.925 | 11,007 | 123,474 | **91.1%** | **11.22x** | 81.7% | 1,197 | 32,260 |
+| Gson | Java | `854c8255b625` | 30% | 70% | 70% | 0.450 | 9,283 | 132,267 | **93.0%** | **14.25x** | 91.7% | 1,189 | 36,941 |
+| **Aggregate, 50 cases** | 5 languages | pinned below | **50%** | **76%** | **84%** | **0.619** | **51,304** | **910,748** | **94.37%** | **17.75x** | n/a | n/a | n/a |
 
-Average context per question is **1,029 estimated tokens** from `agent-shunt` versus **18,422 estimated tokens** for reading those same selected files in full.
+Average context per question is **1,026 estimated tokens** from `agent-shunt` versus **18,215 estimated tokens** for reading those same selected files in full.
 
 ## 2. Plain ripgrep + whole-file reads
 
@@ -114,15 +108,15 @@ This baseline models a simple search-first workflow. Plain `rg` receives the sam
 | Hono | **90%** | **90%** | 0.500 | **0.512** | 9,583 | 220,447 | **95.65%** |
 | Cobra | **100%** | **100%** | **0.950** | 0.717 | 11,039 | 381,187 | **97.10%** |
 | Gson | 70% | **80%** | **0.450** | 0.427 | 9,342 | 334,283 | **97.21%** |
-| **Aggregate, 50 cases** | **84%** | 76% | **0.627** | 0.479 | **51,445** | **2,465,142** | **97.91%** |
+| **Aggregate, 50 cases** | **84%** | 76% | **0.627** | 0.479 | **51,304** | **2,465,142** | **97.92%** |
 
 ### Aggregate top-N trade-off
 
 | Files opened by `rg` | `rg` File-Hit@K | `agent-shunt` File-Hit@K | `rg` whole-file context | agent context | Reduction |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| top 1 | 26% | **50%** | 634,107 | 51,445 | **91.89%** |
-| top 3 | 64% | **78%** | 1,608,472 | 51,445 | **96.80%** |
-| top 5 | 76% | **84%** | 2,465,142 | 51,445 | **97.91%** |
+| top 1 | 26% | **50%** | 634,107 | 51,304 | **91.89%** |
+| top 3 | 64% | **78%** | 1,608,472 | 51,304 | **96.80%** |
+| top 5 | 76% | **84%** | 2,465,142 | 51,304 | **97.91%** |
 
 Plain `rg` still wins Gson File-Hit@5 and narrowly edges Hono file MRR. Those cases remain visible.
 
@@ -178,9 +172,9 @@ The external evaluation and ripgrep-baseline GitHub Actions workflows run these 
 
 Three concise claims supported by the current benchmark are:
 
-> In a reproducible 50-question benchmark across five pinned open-source repositories and five languages, agent-shunt reduced estimated source context by **94.41%** compared with reading the exact same selected files in full, while lexical retrieval reached **84% Chunk-Hit@5** under a 1,200-token budget.
+> In a reproducible 50-question benchmark across five pinned open-source repositories and five languages, agent-shunt reduced estimated source context by **94.37%** compared with reading the exact same selected files in full, while lexical retrieval reached **84% Chunk-Hit@5** under a 1,200-token budget.
 
-> Against a disclosed plain-ripgrep baseline that searches the same preprocessed query terms and reads its top five matching files in full, agent-shunt used **97.91% less estimated source context** while achieving **84% vs 76% File-Hit@5** and **0.627 vs 0.479 file MRR** across the same 50 questions.
+> Against a disclosed plain-ripgrep baseline that searches the same preprocessed query terms and reads its top five matching files in full, agent-shunt used **97.92% less estimated source context** while achieving **84% vs 76% File-Hit@5** and **0.627 vs 0.479 file MRR** across the same 50 questions.
 
 > Against budgeted plain-ripgrep targeted navigation using the same preprocessed query terms and 1,200-token ceiling, agent-shunt reached **84% Chunk-Hit@5** versus **72%** for both targeted baselines, with **0.619 MRR vs 0.446/0.445** and lower estimated context.
 
