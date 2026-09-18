@@ -123,6 +123,30 @@ claims and not measurements of a proprietary coding agent. Public results should
 always name the corpus version, pinned repository commits, token budget, quality
 metrics and baseline definition alongside the savings number.
 
+## Semantic retrieval benchmark
+
+`semantic_eval` compares the production lexical path with the opt-in local
+semantic path on the same pinned corpus, question set, token budget, chunking,
+MMR, and ground truth:
+
+```bash
+cargo run --release --features local-embed --example semantic_eval -- \
+  eval/external/example.json \
+  --root /path/to/external/repository
+```
+
+Use `--json` for machine-readable output. The evaluator uses
+`bge-small-en-v1.5` with dense top-k 24 and reports the one-time cold index
+build separately from warmed per-query latency. Semantic results therefore
+measure the actual production fusion policy rather than a standalone vector
+search.
+
+The GitHub Actions `Semantic retrieval evaluation` workflow runs the same
+comparison across all five pinned external corpora. It runs repositories
+sequentially and reuses the model cache to avoid parallel first-use model
+downloads affecting reproducibility. Latency is informational only; Hit@K, MRR,
+and delivered context are the portable quality measurements.
+
 ## Gates
 
 `gates` makes quality regressions executable instead of descriptive. Each

@@ -1,6 +1,6 @@
 [package]
 name = "agent-shunt"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 description = "Provider-neutral, read-only context worker for coding agents"
 license = "MIT"
@@ -12,6 +12,11 @@ categories = ["command-line-utilities", "development-tools"]
 [[bin]]
 name = "agent-shunt"
 path = "src/main.rs"
+
+[[example]]
+name = "semantic_eval"
+path = "examples/semantic_eval.rs"
+required-features = ["local-embed"]
 
 [features]
 default = ["ast"]
