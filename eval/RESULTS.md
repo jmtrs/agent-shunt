@@ -15,26 +15,26 @@ All token counts below are **estimated context tokens**, not provider billing to
 
 ## Headline
 
-Across the current 50-case corpus, `agent-shunt` delivered **51,835 estimated context tokens**.
+Across the current 50-case corpus, `agent-shunt` delivered **51,445 estimated context tokens**.
 
-Against reading the exact same selected files in full, the baseline required **905,462** estimated tokens. That is an aggregate **94.28% context reduction**, or **17.47x less context**.
+Against reading the exact same selected files in full, the baseline required **921,117** estimated tokens. That is an aggregate **94.41% context reduction**, or **17.90x less context**.
 
-Against the more operational `rg + whole-file reads` baseline:
+Against the operational `rg + whole-file reads` baseline:
 
 | Comparison | agent-shunt context | Baseline context | Reduction | Compression |
 | --- | ---: | ---: | ---: | ---: |
-| `rg` top 1 file in full | 51,835 | 658,290 | **92.13%** | **12.70x** |
-| `rg` top 3 files in full | 51,835 | 1,590,547 | **96.74%** | **30.68x** |
-| `rg` top 5 files in full | 51,835 | 2,432,356 | **97.87%** | **46.92x** |
+| `rg` top 1 file in full | 51,445 | 634,107 | **91.89%** | **12.33x** |
+| `rg` top 3 files in full | 51,445 | 1,608,472 | **96.80%** | **31.27x** |
+| `rg` top 5 files in full | 51,445 | 2,465,142 | **97.91%** | **47.92x** |
 
-The file-level retrieval comparison is also favorable in aggregate:
+The file-level retrieval comparison is:
 
 | System | File-Hit@1 | File-Hit@3 | File-Hit@5 | File MRR |
 | --- | ---: | ---: | ---: | ---: |
-| `agent-shunt` lexical | **50%** | **76%** | **78%** | **0.611** |
-| plain `rg` ranking | 28% | 62% | 74% | 0.489 |
+| `agent-shunt` lexical | **50%** | **78%** | **84%** | **0.627** |
+| plain `rg` ranking | 26% | 64% | 76% | 0.479 |
 
-These are separate from `agent-shunt`'s chunk-level quality metrics. Chunk-level lexical quality remains **Hit@1 50%**, **Hit@3 74%**, **Hit@5 78%**, and **MRR 0.602** under the 1,200-token budget.
+Chunk-level lexical quality is **Hit@1 50%**, **Hit@3 76%**, **Hit@5 84%**, and **MRR 0.619** under the 1,200-token budget.
 
 ## Budgeted targeted-navigation baseline
 
