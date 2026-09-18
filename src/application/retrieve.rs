@@ -1249,7 +1249,7 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
-            &BTreeSet::new(),
+            &BTreeSet::from(["a.rs".to_owned()]),
             10_000,
             false,
         );
@@ -1265,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_fusion_does_not_deepen_a_file_that_survives_the_lexical_floor() {
+    fn dense_fusion_does_not_deepen_a_lexically_selected_file() {
         let mut candidates = vec![
             RetrievedChunk {
                 path: "head.rs".to_owned(),
@@ -1338,7 +1338,7 @@ mod tests {
             &mut candidates,
             &hits,
             &by_path,
-            &BTreeSet::new(),
+            &BTreeSet::from(["a.rs".to_owned()]),
             10_000,
             false,
         );
@@ -1359,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_fusion_can_rescue_a_same_file_match_below_the_lexical_floor() {
+    fn dense_fusion_can_rescue_an_unselected_same_file_candidate() {
         let mut candidates = vec![
             RetrievedChunk {
                 path: "head.rs".to_owned(),
@@ -1422,7 +1422,7 @@ mod tests {
         let dense = candidates
             .iter()
             .find(|candidate| candidate.path == "weak.rs" && candidate.start_line == 10)
-            .expect("semantic recall should rescue a file whose lexical evidence is below floor");
+            .expect("semantic recall should rescue a file omitted by lexical selection");
         assert_eq!(dense.score, 80);
     }
 
