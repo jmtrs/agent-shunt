@@ -1,0 +1,63 @@
+name: Publish v0.12.0 once
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.head_commit.message != 'chore: remove v0.12 release workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Publish v0.12.0 if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git rev-parse "v0.12.0" >/dev/null 2>&1 || gh release view "v0.12.0" >/dev/null 2>&1; then
+            echo "v0.12.0 already exists"
+            exit 0
+          fi
+
+          gh release create "v0.12.0" \
+            --target "$GITHUB_SHA" \
+            --title "v0.12.0 - confidence-gated semantic retrieval" \
+            --notes-file - <<'EOF'
+          ## v0.12.0
+
+          Semantic retrieval is now a bounded complement to lexical retrieval instead of an equal-authority ranking.
+
+          ### Retrieval quality
+
+          On the reproducible 50-question external benchmark across five pinned repositories and five languages, under the same 1,200-token budget:
+
+          | Strategy | Hit@1 | Hit@3 | Hit@5 | MRR |
+          | --- | ---: | ---: | ---: | ---: |
+          | lexical | 50% | 74% | 78% | 0.602 |
+          | local semantic | 50% | 84% | 88% | 0.662 |
+
+          Aggregate Hit@1 is unchanged. Semantic retrieval adds 10 percentage points at Hit@3 and Hit@5 and improves MRR by about 0.060.
+
+          The per-repository results are published rather than hidden: ripgrep Hit@3 moves from 80% to 70%, while Hit@5 remains 90% and MRR improves slightly from 0.587 to 0.595.
+
+          ### What changed
+
+          - Replaced 1:1 lexical+dense RRF with confidence-gated semantic recall.
+          - Preserves lexical scores and the lexical #1 result.
+          - Admits at most one semantic region under the existing token budget.
+          - Requires the leading semantic file to be clearly separated from the next distinct file.
+          - Prevents semantic fall-through when the validated head cannot contribute.
+          - Fixed cross-file overlap handling in dense-region admission.
+          - Bounded local FastEmbed inference to batches of 32 for robust indexing of large source files.
+          - Added a reproducible semantic evaluator and GitHub Actions workflow.
+
+          Context-savings claims from v0.11.0 remain separate: they measure lexical source-context efficiency, not provider billing or LLM cost.
+
+          See `eval/RESULTS.md` for methodology, caveats, pinned commits, and reproduction commands.
+          EOF
