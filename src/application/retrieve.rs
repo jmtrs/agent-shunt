@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Result, bail};
 
@@ -10,9 +7,7 @@ use crate::{
         ChangeSource, CodeSearch, ContextWorker, CredentialResolver, DenseIndex, DocumentLoader,
         QueryExpander, Reranker, StructureResolver,
     },
-    domain::{
-        Document, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult,
-    },
+    domain::{Document, Limits, LineRange, RetrieveResult, RetrievedChunk, ScanResult},
 };
 
 mod prf;

@@ -118,4 +118,3 @@ pub(super) fn is_compound_identifier(token: &str) -> bool {
         .windows(2)
         .any(|pair| (pair[0].is_lowercase() || pair[0].is_ascii_digit()) && pair[1].is_uppercase())
 }
-

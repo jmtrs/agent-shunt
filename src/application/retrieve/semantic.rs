@@ -152,4 +152,3 @@ pub(super) fn fuse_dense(
 fn overlaps(candidate: &RetrievedChunk, hit: &DenseHit) -> bool {
     candidate.start_line <= hit.range.end_line && hit.range.start_line <= candidate.end_line
 }
-

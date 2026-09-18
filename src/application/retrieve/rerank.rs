@@ -55,4 +55,3 @@ pub(super) fn rerank_candidates(
     });
     Ok(())
 }
-

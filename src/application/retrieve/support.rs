@@ -163,4 +163,3 @@ pub(super) fn hit_in_changed_lines(hit: &crate::domain::SearchHit, change: &File
             })
         })
 }
-
