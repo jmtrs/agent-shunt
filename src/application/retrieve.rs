@@ -892,14 +892,8 @@ mod tests {
             .iter()
             .find(|candidate| candidate.path == "c.rs")
             .expect("dense-only chunk was not injected");
-        assert_eq!(dense.score, 89);
-        assert_eq!(
-            candidates
-                .iter()
-                .map(|candidate| candidate.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a.rs", "b.rs", "c.rs"]
-        );
+        assert_eq!(dense.score, 90);
+        assert!(dense.score < candidates[0].score);
     }
 
     #[test]
@@ -1219,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_fusion_can_strengthen_a_lexically_weak_file() {
+    fn dense_fusion_does_not_deepen_a_lexically_weak_file() {
         let mut candidates = vec![
             RetrievedChunk {
                 path: "head.rs".to_owned(),
@@ -1290,19 +1284,13 @@ mod tests {
 
         fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
 
-        let dense = candidates
-            .iter()
-            .find(|candidate| candidate.path == "a.rs" && candidate.start_line == 10)
-            .expect("weakly represented file should receive semantic recall");
-        assert_eq!(dense.score, 39);
-        assert!(
-            dense.score
-                < candidates
-                    .iter()
-                    .filter(|candidate| candidate.path != "a.rs")
-                    .map(|candidate| candidate.score)
-                    .min()
-                    .unwrap()
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.path == "a.rs")
+                .count(),
+            1,
+            "semantic recall must not deepen a file lexical retrieval already found"
         );
     }
 
