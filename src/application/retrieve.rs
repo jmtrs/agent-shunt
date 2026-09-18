@@ -892,8 +892,8 @@ mod tests {
             .iter()
             .find(|candidate| candidate.path == "c.rs")
             .expect("dense-only chunk was not injected");
-        assert_eq!(dense.score, 90);
-        assert!(dense.score < candidates[0].score);
+        assert_eq!(dense.score, 89);
+        assert!(dense.score < candidates[1].score);
     }
 
     #[test]
@@ -1288,7 +1288,62 @@ mod tests {
             .iter()
             .find(|candidate| candidate.path == "a.rs" && candidate.start_line == 10)
             .expect("weakly represented file should receive semantic recall");
-        assert_eq!(dense.score, 80);
+        assert_eq!(dense.score, 79);
+    }
+
+    #[test]
+    fn dense_fusion_stays_out_of_the_upper_half_on_broad_rankings() {
+        let chunk = |path: &str, score: usize| RetrievedChunk {
+            path: path.to_owned(),
+            start_line: 1,
+            end_line: 1,
+            score,
+            estimated_tokens: 10,
+            content: format!("{path} lexical"),
+            source: None,
+            matched_terms: None,
+        };
+        let mut candidates = vec![
+            chunk("a.rs", 100),
+            chunk("b.rs", 90),
+            chunk("c.rs", 80),
+            chunk("d.rs", 70),
+            chunk("e.rs", 60),
+            chunk("f.rs", 50),
+        ];
+        let doc = Document {
+            path: "dense.rs".to_owned(),
+            bytes: 10,
+            line_count: 1,
+            lines: vec!["dense".to_owned()],
+            numbered_content: String::new(),
+            allowed_ranges: Vec::new(),
+        };
+        let by_path = BTreeMap::from([("dense.rs".to_owned(), &doc)]);
+        let hits = [DenseHit {
+            path: "dense.rs".to_owned(),
+            range: LineRange {
+                start_line: 1,
+                end_line: 1,
+            },
+            similarity: 0.9,
+        }];
+
+        fuse_dense(&mut candidates, &hits, &by_path, 10_000, false);
+
+        let dense = candidates
+            .iter()
+            .find(|candidate| candidate.path == "dense.rs")
+            .expect("dense candidate missing");
+        assert_eq!(dense.score, 69);
+        assert_eq!(
+            candidates
+                .iter()
+                .take(4)
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.rs", "b.rs", "c.rs", "d.rs"]
+        );
     }
 
     #[test]
