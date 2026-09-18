@@ -5,6 +5,8 @@
 
 Find the code a question needs without filling your coding agent's context with whole files. `agent-shunt` returns ranked source excerpts with paths and line numbers, within a token budget. With default settings, retrieval runs locally, with no API key or network request.
 
+Inspired by [Spotify's Portal "shunt" plugin](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90), which showed the cost of bulk code reads in an agent's context. `agent-shunt` applies that idea through local retrieval and validates file and line references in optional model findings.
+
 ```bash
 agent-shunt retrieve --question "Where is authentication enforced?" --dir .
 ```
