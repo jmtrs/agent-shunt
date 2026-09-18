@@ -13,16 +13,17 @@ Use it when you need to locate or understand code across a repository. If you al
 
 ## Quick start
 
-Install [Rust](https://www.rust-lang.org/tools/install) and [ripgrep](https://github.com/BurntSushi/ripgrep), then:
+Install [ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep` on macOS or `sudo apt install ripgrep` on Ubuntu/Debian), then download the latest prebuilt binary:
 
 ```bash
-git clone https://github.com/jmtrs/agent-shunt.git
-cd agent-shunt
-cargo install --path . --locked
-agent-shunt retrieve --question "Where is authentication enforced?" --dir /path/to/your/repo
+curl -fsSL https://raw.githubusercontent.com/jmtrs/agent-shunt/main/install.sh -o install.sh
+sh install.sh
+~/.local/bin/agent-shunt retrieve --question "Where is authentication enforced?" --dir /path/to/your/repo
 ```
 
-The result is JSON with `chunks[]`: each chunk has a path, line range, source text, and relevance score. `--budget-tokens` caps the estimated source context (default: 12,000). No configuration is needed for this command.
+The installer supports macOS and Linux on Intel/AMD and ARM, verifies the download checksum, and puts the binary in `~/.local/bin` (set `AGENT_SHUNT_INSTALL_DIR` to choose another directory). It does not need Rust or a repository clone. If `~/.local/bin` is not on your `PATH`, the installer tells you. You can also [download a release asset directly](https://github.com/jmtrs/agent-shunt/releases/latest).
+
+The result is JSON with `chunks[]`: each chunk has a path, line range, source text, and relevance score. `--budget-tokens` caps the estimated source context (default: 12,000). No configuration is needed for this command. To build from source instead, clone the repository and run `cargo install --path . --locked --features local-embed`.
 
 ## Choose a command
 
@@ -54,7 +55,7 @@ Options can be combined where useful, for example `--semantic --rerank` for broa
 
 `--semantic` builds a persistent embedding index to recall code that shares few words with the question. The index caches vectors by file content and model, so later runs only re-embed changed files.
 
-For embeddings on your machine, install the optional ONNX backend:
+The prebuilt binary includes the ONNX backend. If you build from source, enable it explicitly:
 
 ```bash
 cargo install --path . --locked --features local-embed

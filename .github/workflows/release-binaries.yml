@@ -1,0 +1,68 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (for example, v0.13.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      ASSET: agent-shunt-${{ matrix.target }}.tar.gz
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Confirm release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null
+
+      - name: Build with local embeddings
+        run: cargo build --release --locked --features local-embed
+
+      - name: Verify version and package
+        shell: bash
+        run: |
+          test "$(target/release/agent-shunt --version)" = "agent-shunt ${RELEASE_TAG#v}"
+          mkdir -p dist
+          cp target/release/agent-shunt dist/agent-shunt
+          tar -C dist -czf "dist/$ASSET" agent-shunt
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
+          else
+            (cd dist && shasum -a 256 "$ASSET" > "$ASSET.sha256")
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" "dist/$ASSET" "dist/$ASSET.sha256" --repo "$GITHUB_REPOSITORY" --clobber
