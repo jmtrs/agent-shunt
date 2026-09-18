@@ -123,6 +123,32 @@ claims and not measurements of a proprietary coding agent. Public results should
 always name the corpus version, pinned repository commits, token budget, quality
 metrics and baseline definition alongside the savings number.
 
+
+## Ripgrep navigation baselines
+
+`rg_baseline_eval` also measures two stronger search-first baselines under the
+**same token budget** as agent-shunt:
+
+- **rg + fixed window**: rank plain-ripgrep matches, then read the configured
+  context window around each hit until the budget is exhausted.
+- **rg + enclosing symbol**: use the same plain-ripgrep ranking, then expand each
+  hit to its enclosing function/method/class when a bounded structural span is
+  available, falling back to the fixed window otherwise.
+
+Both variants deduplicate overlapping reads and stop at the corpus token budget.
+Hits are interleaved by ranked file: the best hit from each ranked file is
+considered before a second hit from any file, so the baseline cannot spend most
+of its budget drilling into one leader. They deliberately do not use
+agent-shunt's filename/path boosts, IDF weighting, MMR, PRF, semantic retrieval,
+or relevance pruning. The symbol variant shares only the structural resolver so
+the comparison isolates retrieval/ranking rather than penalizing the baseline
+for reading an arbitrary line window.
+
+This is a harder comparison than `rg + whole-file reads`: it asks whether
+agent-shunt retrieves better evidence than a competent targeted-navigation
+workflow at roughly the same context allowance, not merely whether chunking
+saves tokens versus opening entire files.
+
 ## Semantic retrieval benchmark
 
 `semantic_eval` compares the production lexical path with the opt-in local

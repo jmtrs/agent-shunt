@@ -1,4 +1,4 @@
-name: Ripgrep whole-file baseline
+name: Ripgrep navigation baselines
 
 on:
   workflow_dispatch:
@@ -7,6 +7,7 @@ on:
       - "eval/external/**"
       - "examples/rg_baseline_eval.rs"
       - "src/application/retrieve.rs"
+      - "src/application/retrieve/**"
       - "src/application/resolver.rs"
       - "src/application/ports.rs"
       - "src/adapters/ripgrep.rs"
@@ -68,7 +69,7 @@ jobs:
           git -C "$TARGET_DIR" checkout --detach "$TARGET_COMMIT"
           test "$(git -C "$TARGET_DIR" rev-parse HEAD)" = "$TARGET_COMMIT"
 
-      - name: Compare agent-shunt with ripgrep whole-file workflow
+      - name: Compare agent-shunt with ripgrep navigation workflows
         run: >-
           cargo run --release --example rg_baseline_eval --
           eval/external/${{ matrix.corpus }}.json

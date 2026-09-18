@@ -5,10 +5,11 @@ Semantic retrieval update: 2026-09-18
 
 These results measure source-context efficiency and retrieval quality for `agent-shunt` lexical retrieval across 50 human-authored architecture and implementation questions over five pinned open-source repositories in Rust, Python, TypeScript, Go, and Java.
 
-Two baselines are reported:
+Three baseline comparisons are reported:
 
 1. **Same selected files in full**: a deliberately conservative baseline that is given `agent-shunt`'s selected files for free and reads those files completely.
 2. **Plain ripgrep + whole-file reads**: a reproducible search workflow that receives the same preprocessed query terms as `agent-shunt`, ranks matching files, and reads the top 1, 3, or 5 files completely.
+3. **Plain ripgrep + targeted reads**: the same ripgrep ranking followed by either a fixed context window or a bounded enclosing-symbol read, under the same 1,200-token budget as `agent-shunt`.
 
 All token counts below are **estimated context tokens**, not provider billing tokens.
 
@@ -34,6 +35,44 @@ The file-level retrieval comparison is also favorable in aggregate:
 | plain `rg` ranking | 28% | 62% | 74% | 0.489 |
 
 These are separate from `agent-shunt`'s chunk-level quality metrics. Chunk-level lexical quality remains **Hit@1 50%**, **Hit@3 74%**, **Hit@5 78%**, and **MRR 0.602** under the 1,200-token budget.
+
+## Budgeted targeted-navigation baseline
+
+The whole-file baseline measures context compression, but a competent repository-navigation workflow usually does not open every matching file in full. The stronger deterministic comparison therefore keeps plain `rg` for discovery and gives it the **same 1,200-token context budget** as `agent-shunt`.
+
+To make this baseline harder to beat, targeted reads are **interleaved by ranked file**: the best hit from each ranked file is considered before taking a second hit from any file. This prevents the baseline from wasting most of its budget drilling into the first matching file.
+
+Two targeted variants are measured:
+
+- **`rg + window`**: read the configured ±8-line context around ranked matches.
+- **`rg + symbol`**: expand each ranked match to its bounded enclosing function/method/class when available, otherwise fall back to the same fixed window.
+
+Overlapping reads are deduplicated. Neither variant uses filename/path boosts, IDF weighting, MMR, PRF, semantic retrieval, or relevance pruning. The symbol variant shares only the structural resolver after plain `rg` has already chosen the hit.
+
+| Repository | agent Hit@5 | agent MRR | agent tokens | `rg + window` Hit@5 | window MRR | window tokens | `rg + symbol` Hit@5 | symbol MRR | symbol tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ripgrep | **90%** | **0.587** | **10,066** | 40% | 0.220 | 11,761 | 40% | 0.220 | 11,767 |
+| Flask | **70%** | **0.633** | **11,415** | 60% | 0.400 | 11,683 | **70%** | 0.420 | 11,673 |
+| Hono | 60% | 0.417 | **9,973** | **90%** | **0.500** | 11,737 | **90%** | **0.500** | 11,703 |
+| Cobra | **100%** | **0.925** | **11,039** | **100%** | 0.717 | 11,604 | **100%** | 0.717 | 11,675 |
+| Gson | **70%** | **0.450** | **9,342** | **70%** | 0.392 | 11,587 | 60% | 0.367 | 11,772 |
+| **Aggregate, 50 cases** | **78%** | **0.602** | **51,835** | 72% | 0.446 | 58,372 | 72% | 0.445 | 58,590 |
+
+At the same nominal context ceiling, aggregate chunk quality is:
+
+| Strategy | Hit@1 | Hit@3 | Hit@5 | MRR | Avg. context/query |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `agent-shunt` lexical | **50%** | **74%** | **78%** | **0.602** | **1,036.7** |
+| `rg + window` | 26% | 64% | 72% | 0.446 | 1,167.4 |
+| `rg + symbol` | 26% | 64% | 72% | 0.445 | 1,171.8 |
+
+The stronger baseline narrows the gap substantially. Aggregate Hit@5 is **78% vs 72%**, while MRR remains higher for agent-shunt (**0.602 vs 0.446/0.445**). Agent-shunt also delivers about **11.2% less estimated context than `rg + window`** and **11.5% less than `rg + symbol`**.
+
+The per-repository results matter. On Hono, both targeted `rg` variants reach **90% Hit@5 and 0.500 MRR**, versus **60% and 0.417** for agent-shunt. On Cobra all three reach 100% Hit@5, although agent-shunt ranks the relevant evidence earlier. Flask's symbol variant and Gson's window variant also tie agent-shunt on Hit@5. These cases are intentionally visible rather than tuned away.
+
+The result still does **not** prove superiority to a coding agent. A real agent may reformulate queries, follow references, use an LSP, inspect repository maps, or perform multiple adaptive search/read rounds. This benchmark isolates one deterministic question: whether agent-shunt's one-pass lexical retrieval improves on a strong one-pass ripgrep navigation workflow under the same evidence budget.
+
+The machine-readable snapshot is [`eval/results/2026-09-18-targeted-rg.json`](results/2026-09-18-targeted-rg.json), validated by workflow run `35334642412` across all five pinned repositories.
 
 ## Semantic retrieval quality
 
@@ -200,5 +239,7 @@ Two concise claims supported by the current benchmark are:
 > In a reproducible 50-question benchmark across five pinned open-source repositories and five languages, agent-shunt reduced estimated source context by **94.28%** compared with reading the exact same selected files in full, while lexical retrieval reached **78% Chunk-Hit@5** under a 1,200-token budget.
 
 > Against a disclosed plain-ripgrep baseline that searches the same preprocessed query terms and reads its top five matching files in full, agent-shunt used **97.87% less estimated source context** while achieving **78% vs 74% File-Hit@5** and **0.611 vs 0.489 file MRR** across the same 50 questions.
+
+> Against budgeted plain-ripgrep targeted navigation using the same preprocessed query terms and the same 1,200-token ceiling, agent-shunt reached **78% Chunk-Hit@5** versus **72% for both fixed-window and enclosing-symbol reads**, with **0.602 MRR vs 0.446/0.445** and lower estimated context across the same 50-question corpus. Per-repository results include Hono, where both targeted `rg` variants outperform agent-shunt.
 
 Do not rewrite these as "94%/98% lower LLM cost", "fewer billed tokens", or "better than coding agents". Those claims were not measured by these benchmarks.
