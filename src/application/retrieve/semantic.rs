@@ -4,6 +4,9 @@ use crate::domain::{DenseHit, Document, RetrievedChunk};
 
 use super::{SEMANTIC_MIN_RELATIVE_FILE_MARGIN, support::delivered_tokens};
 
+/// Returns the top semantic file only when it is meaningfully separated from
+/// the next distinct file. The ratio is relative to the leader's own cosine
+/// similarity, avoiding an absolute similarity threshold tied to one model.
 fn confident_dense_head_path(hits: &[DenseHit]) -> Option<&str> {
     let head = hits.first()?;
     if !head.similarity.is_finite() || head.similarity <= 0.0 {
@@ -150,6 +153,3 @@ fn overlaps(candidate: &RetrievedChunk, hit: &DenseHit) -> bool {
     candidate.start_line <= hit.range.end_line && hit.range.start_line <= candidate.end_line
 }
 
-/// Reorders the top-k candidates by an LLM relevance score, lifting them above
-/// the untouched tail so the budget packs the model-preferred chunks first. The
-/// tail keeps its ranking; only the head is re-judged, bounding the LLM cost.

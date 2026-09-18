@@ -4,6 +4,9 @@ use crate::{application::ports::Reranker, domain::RetrievedChunk};
 
 use super::RERANK_TOP_K;
 
+/// Reorders the top-k candidates by an LLM relevance score, lifting them above
+/// the untouched tail so the budget packs the model-preferred chunks first. The
+/// tail keeps its ranking; only the head is re-judged, bounding the LLM cost.
 pub(super) fn rerank_candidates(
     rerank: &dyn Reranker,
     question: &str,
@@ -53,7 +56,3 @@ pub(super) fn rerank_candidates(
     Ok(())
 }
 
-/// Tokens the caller actually pays for a chunk: its numbered content and path,
-/// plus the JSON envelope. Budgeting and the reported `estimatedTokens` both
-/// use this so the token budget matches the delivered footprint instead of
-/// undercounting by the envelope.

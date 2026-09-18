@@ -47,9 +47,10 @@ pub(super) fn documents_from_chunks(
         .collect()
 }
 
-/// Returns the top semantic file only when it is meaningfully separated from
-/// the next distinct file. The ratio is relative to the leader's own cosine
-/// similarity, avoiding an absolute similarity threshold tied to one model.
+/// Tokens the caller actually pays for a chunk: its numbered content and path,
+/// plus the JSON envelope. Budgeting and the reported `estimatedTokens` both
+/// use this so the token budget matches the delivered footprint instead of
+/// undercounting by the envelope.
 pub(super) fn delivered_tokens(content: &str, path: &str) -> usize {
     estimate_tokens(content) + estimate_tokens(path) + ENVELOPE_TOKENS_PER_CHUNK
 }
