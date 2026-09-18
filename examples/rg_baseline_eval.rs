@@ -590,15 +590,16 @@ fn targeted_rg_chunks(
 
         let mut content = document.numbered_range(range);
         let mut estimated_tokens = delivered_tokens(&content, &hit.path);
-        let (range, content_tokens) =
-            if estimated_tokens > config.budget_tokens && matches!(config.mode, TargetedReadMode::Symbol) {
-                let fallback = document.trim_trivial(window);
-                content = document.numbered_range(fallback);
-                estimated_tokens = delivered_tokens(&content, &hit.path);
-                (fallback, estimated_tokens)
-            } else {
-                (range, estimated_tokens)
-            };
+        let (range, content_tokens) = if estimated_tokens > config.budget_tokens
+            && matches!(config.mode, TargetedReadMode::Symbol)
+        {
+            let fallback = document.trim_trivial(window);
+            content = document.numbered_range(fallback);
+            estimated_tokens = delivered_tokens(&content, &hit.path);
+            (fallback, estimated_tokens)
+        } else {
+            (range, estimated_tokens)
+        };
         estimated_tokens = content_tokens;
 
         if estimated_tokens > config.budget_tokens
