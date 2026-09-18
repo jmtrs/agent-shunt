@@ -892,8 +892,14 @@ mod tests {
             .iter()
             .find(|candidate| candidate.path == "c.rs")
             .expect("dense-only chunk was not injected");
-        assert_eq!(dense.score, 90);
-        assert!(dense.score < candidates[0].score);
+        assert_eq!(dense.score, 89);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.rs", "b.rs", "c.rs"]
+        );
     }
 
     #[test]
@@ -1288,7 +1294,16 @@ mod tests {
             .iter()
             .find(|candidate| candidate.path == "a.rs" && candidate.start_line == 10)
             .expect("weakly represented file should receive semantic recall");
-        assert_eq!(dense.score, 80);
+        assert_eq!(dense.score, 39);
+        assert!(
+            dense.score
+                < candidates
+                    .iter()
+                    .filter(|candidate| candidate.path != "a.rs")
+                    .map(|candidate| candidate.score)
+                    .min()
+                    .unwrap()
+        );
     }
 
     #[test]
