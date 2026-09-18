@@ -136,10 +136,13 @@ metrics and baseline definition alongside the savings number.
   available, falling back to the fixed window otherwise.
 
 Both variants deduplicate overlapping reads and stop at the corpus token budget.
-They deliberately do not use agent-shunt's filename/path boosts, IDF weighting,
-MMR, PRF, semantic retrieval, or relevance pruning. The symbol variant shares
-only the structural resolver so the comparison isolates retrieval/ranking rather
-than penalizing the baseline for reading an arbitrary line window.
+Hits are interleaved by ranked file: the best hit from each ranked file is
+considered before a second hit from any file, so the baseline cannot spend most
+of its budget drilling into one leader. They deliberately do not use
+agent-shunt's filename/path boosts, IDF weighting, MMR, PRF, semantic retrieval,
+or relevance pruning. The symbol variant shares only the structural resolver so
+the comparison isolates retrieval/ranking rather than penalizing the baseline
+for reading an arbitrary line window.
 
 This is a harder comparison than `rg + whole-file reads`: it asks whether
 agent-shunt retrieves better evidence than a competent targeted-navigation
