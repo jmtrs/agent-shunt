@@ -1008,7 +1008,11 @@ mod tests {
             r#"{ "marker": true, "description": "marker" }"#,
         )
         .unwrap();
-        fs::write(root.path().join("tsconfig.build.json"), r#"{ "marker": true }"#).unwrap();
+        fs::write(
+            root.path().join("tsconfig.build.json"),
+            r#"{ "marker": true }"#,
+        )
+        .unwrap();
 
         let hits = RipgrepSearch
             .search(root.path(), "marker", 20, &[])
