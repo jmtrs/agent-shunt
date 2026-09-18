@@ -21,22 +21,22 @@ A reproducible external benchmark uses **50 human-authored architecture and impl
 
 | Comparison | agent-shunt | Baseline | Context reduction |
 | --- | ---: | ---: | ---: |
-| Same selected files, read in full | 51,835 | 905,462 | **94.28% (17.47x)** |
-| Plain `rg` + top-1 file in full | 51,835 | 658,290 | **92.13% (12.70x)** |
-| Plain `rg` + top-3 files in full | 51,835 | 1,590,547 | **96.74% (30.68x)** |
-| Plain `rg` + top-5 files in full | 51,835 | 2,432,356 | **97.87% (46.92x)** |
+| Same selected files, read in full | 51,445 | 921,117 | **94.41% (17.90x)** |
+| Plain `rg` + top-1 file in full | 51,445 | 634,107 | **91.89% (12.33x)** |
+| Plain `rg` + top-3 files in full | 51,445 | 1,608,472 | **96.80% (31.27x)** |
+| Plain `rg` + top-5 files in full | 51,445 | 2,465,142 | **97.91% (47.92x)** |
 
-At file level, agent-shunt reached **78% File-Hit@5 and 0.611 MRR**, versus **74% File-Hit@5 and 0.489 MRR** for the disclosed `rg + whole-file reads` baseline. The comparison is not cherry-picked: the published per-repository table also shows the corpora where plain `rg` wins a metric.
+At file level, agent-shunt reached **84% File-Hit@5 and 0.627 MRR**, versus **76% File-Hit@5 and 0.479 MRR** for the disclosed `rg + whole-file reads` baseline. The comparison is not cherry-picked: the published per-repository table also shows the corpora where plain `rg` wins a metric.
 
 A harder same-budget comparison avoids giving `rg` an artificially expensive whole-file workflow. Plain `rg` ranks matching files, then targeted reads are interleaved across those files until the same 1,200-token ceiling is reached:
 
 | Strategy | Hit@1 | Hit@3 | Hit@5 | MRR | Avg. context/query |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `agent-shunt` lexical | **50%** | **74%** | **78%** | **0.602** | **1,036.7** |
+| `agent-shunt` lexical | **50%** | **76%** | **84%** | **0.619** | **1,028.9** |
 | `rg + fixed window` | 26% | 64% | 72% | 0.446 | 1,167.4 |
 | `rg + enclosing symbol` | 26% | 64% | 72% | 0.445 | 1,171.8 |
 
-This comparison is intentionally less flattering and more realistic. On Hono, both targeted `rg` variants reach **90% Hit@5** versus **60%** for agent-shunt. Aggregate results still favor agent-shunt, but this remains a deterministic retrieval benchmark, not a claim that agent-shunt outperforms full coding agents.
+This comparison is intentionally harder and more realistic. On Hono, agent-shunt now matches both targeted `rg` variants at **90% Hit@5 / 0.500 MRR** after project metadata is down-ranked behind implementation source. This remains a deterministic retrieval benchmark, not a claim that agent-shunt outperforms full coding agents.
 
 These are **estimated source-context tokens**, not provider billing tokens or measured API cost. Repositories, commits, evaluator code, CI runs, caveats, and machine-readable snapshots are public in [`eval/RESULTS.md`](eval/RESULTS.md), [`eval/results/2026-09-17.json`](eval/results/2026-09-17.json), and [`eval/results/2026-09-18-targeted-rg.json`](eval/results/2026-09-18-targeted-rg.json).
 
@@ -46,10 +46,10 @@ The opt-in local semantic path was evaluated on the **same 50 questions, pinned 
 
 | Strategy | Hit@1 | Hit@3 | Hit@5 | MRR |
 | --- | ---: | ---: | ---: | ---: |
-| lexical | **50%** | 74% | 78% | 0.602 |
-| local semantic | **50%** | **84%** | **88%** | **0.662** |
+| lexical | **50%** | 76% | 84% | 0.619 |
+| local semantic | **50%** | **82%** | **88%** | **0.657** |
 
-The confidence-gated semantic path keeps aggregate Hit@1 unchanged while adding **10 percentage points at Hit@3 and Hit@5** and improving MRR by **0.060**. Average delivered context is **1,052 estimated tokens/query** versus **1,037** for lexical retrieval, under the same 1,200-token cap. It is not uniformly better on every repository: on ripgrep, Hit@3 moves from 80% to 70%, while Hit@5 stays at 90% and MRR improves slightly from 0.587 to 0.595. Per-repository results and reproduction instructions are in [`eval/RESULTS.md`](eval/RESULTS.md), with a machine-readable snapshot in [`eval/results/2026-09-18-semantic.json`](eval/results/2026-09-18-semantic.json).
+The confidence-gated semantic path keeps aggregate Hit@1 unchanged while adding **6 percentage points at Hit@3**, **4 at Hit@5**, and improving MRR by about **0.038**. Average delivered context is **1,051 estimated tokens/query** versus **1,029** for lexical retrieval, under the same 1,200-token cap. It is not uniformly better: ripgrep Hit@3 falls from 80% to 70%, and on Hono the stronger lexical path reaches 90% Hit@5 / 0.500 MRR while semantic falls to 80% / 0.475. Per-repository results and reproduction instructions are in [`eval/RESULTS.md`](eval/RESULTS.md), with a machine-readable snapshot in [`eval/results/2026-09-18-semantic.json`](eval/results/2026-09-18-semantic.json).
 
 ## Two paths
 

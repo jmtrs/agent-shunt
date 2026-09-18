@@ -19,35 +19,33 @@
     "localBatchSize": 32
   },
   "validationRuns": {
-    "flaskHonoCobra": 35325175962,
-    "gson": 35325177443,
-    "ripgrep": 35325527573
+    "matrix": 35336476560
   },
   "aggregate": {
     "lexical": {
       "hitAt": {
         "1": 0.5,
-        "3": 0.74,
-        "5": 0.78
+        "3": 0.76,
+        "5": 0.84
       },
-      "mrr": 0.6023333333333334,
-      "avgTokens": 1036.7
+      "mrr": 0.619,
+      "avgTokens": 1028.9
     },
     "semantic": {
       "hitAt": {
         "1": 0.5,
-        "3": 0.84,
+        "3": 0.82,
         "5": 0.88
       },
-      "mrr": 0.6623333333333333,
-      "avgTokens": 1052.12
+      "mrr": 0.6573333333333332,
+      "avgTokens": 1050.56
     }
   },
   "corpora": {
     "ripgrep": {
       "language": "Rust",
       "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
-      "runId": 35325527573,
+      "runId": 35336476560,
       "lexical": {
         "hitAt": {
           "1": 0.4,
@@ -70,7 +68,7 @@
     "flask": {
       "language": "Python",
       "commit": "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35",
-      "runId": 35325175962,
+      "runId": 35336476560,
       "lexical": {
         "hitAt": {
           "1": 0.6,
@@ -93,30 +91,30 @@
     "hono": {
       "language": "TypeScript",
       "commit": "098e11912ab244c5c33931de007f04dc8e3c2929",
-      "runId": 35325175962,
+      "runId": 35336476560,
       "lexical": {
         "hitAt": {
           "1": 0.3,
-          "3": 0.6,
-          "5": 0.6
+          "3": 0.7,
+          "5": 0.9
         },
-        "mrr": 0.41666666666666663,
-        "avgTokens": 997.3
+        "mrr": 0.5,
+        "avgTokens": 958.3
       },
       "semantic": {
         "hitAt": {
           "1": 0.3,
-          "3": 0.8,
+          "3": 0.7,
           "5": 0.8
         },
-        "mrr": 0.5,
-        "avgTokens": 982.9
+        "mrr": 0.475,
+        "avgTokens": 975.1
       }
     },
     "cobra": {
       "language": "Go",
       "commit": "adbc8813901bba65827259daa8e22ff94ec1f30e",
-      "runId": 35325175962,
+      "runId": 35336476560,
       "lexical": {
         "hitAt": {
           "1": 0.9,
@@ -139,7 +137,7 @@
     "gson": {
       "language": "Java",
       "commit": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
-      "runId": 35325177443,
+      "runId": 35336476560,
       "lexical": {
         "hitAt": {
           "1": 0.3,
@@ -160,14 +158,20 @@
       }
     }
   },
-  "knownTradeoff": {
-    "corpus": "ripgrep",
-    "description": "Hit@3 decreases from 0.80 to 0.70 while Hit@5 stays 0.90 and MRR increases from 0.587 to 0.595. gitignore-matching moves rank 3 to 4; file-type-globs moves rank 3 to 2."
-  },
   "caveats": [
     "Hit@K and MRR measure retrieval quality, not final LLM answer correctness.",
     "Token counts use agent-shunt's conservative context estimator, not a provider billing tokenizer.",
     "Latency is runner-dependent and is not used as a quality gate.",
     "Semantic retrieval is opt-in; the default lexical retrieve path remains local, keyless, and provider-free."
+  ],
+  "knownTradeoffs": [
+    {
+      "corpus": "ripgrep",
+      "description": "Hit@3 decreases from 0.80 to 0.70 while Hit@5 stays 0.90 and MRR increases from 0.587 to 0.595."
+    },
+    {
+      "corpus": "hono",
+      "description": "After metadata down-ranking improves lexical retrieval to Hit@5 0.90 / MRR 0.500, semantic fusion falls to Hit@5 0.80 / MRR 0.475. Semantic recall is therefore not a universal improvement over the stronger lexical baseline."
+    }
   ]
 }
