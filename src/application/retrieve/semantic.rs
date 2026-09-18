@@ -31,10 +31,10 @@ fn confident_dense_head_path(hits: &[DenseHit]) -> Option<&str> {
 /// existing lexical scores are never rewritten and dense evidence can never
 /// tie or outrank the strongest lexical candidate.
 ///
-/// Only one non-overlapping dense region is admitted, and only when that file
-/// is not already represented at or above the lexical score tier dense would
-/// receive. Semantic recall may strengthen a weakly represented file, but it
-/// must not spend budget deepening a file that is already strong lexically.
+/// Only one non-overlapping dense region is admitted. Files that the lexical-only
+/// selector would already deliver under the same relevance floor, MMR policy,
+/// per-file cap, and token budget are protected from semantic depth. Intermediate
+/// lexical candidates that would not be delivered may still be rescued.
 pub(super) fn fuse_dense(
     candidates: &mut Vec<RetrievedChunk>,
     hits: &[DenseHit],
