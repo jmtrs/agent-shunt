@@ -114,6 +114,13 @@ const PATH_COMPONENT_BOOST: usize = 2;
 const PROSE_SCORE_NUM: usize = 1;
 const PROSE_SCORE_DEN: usize = 3;
 
+/// Project manifests and tool configuration often repeat broad vocabulary
+/// without implementing the behavior being asked about. Keep them searchable,
+/// but make source code win when both match. This penalty is deliberately
+/// milder than the prose penalty because metadata can be legitimate evidence.
+const METADATA_SCORE_NUM: usize = 1;
+const METADATA_SCORE_DEN: usize = 2;
+
 /// Extensions whose content is prose, not source. Down-weighted, not excluded:
 /// a doc may still be the only evidence for a question about the docs.
 const PROSE_EXTENSIONS: &[&str] = &["md", "mdc", "markdown", "rst", "txt", "adoc", "org"];
@@ -133,6 +140,28 @@ const PROSE_STEMS: &[&str] = &[
     "notice",
     "copying",
     "codeowners",
+];
+
+const PROJECT_METADATA_NAMES: &[&str] = &[
+    "cargo.toml",
+    "pyproject.toml",
+    "setup.cfg",
+    "go.mod",
+    "go.work",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "package.json",
+    "package.cjs.json",
+    "jsr.json",
+    "deno.json",
+    "deno.jsonc",
+    "biome.json",
+    "turbo.json",
+    "nx.json",
+    "lerna.json",
 ];
 
 const STOP_WORDS: &[&str] = &[
@@ -342,12 +371,16 @@ impl CodeSearch for RipgrepSearch {
             hit.score = filename_boost_of(hit.matched_terms, &term_weight);
         }
         hits.append(&mut filename_raw);
-        // Sink prose below matching source: a README's broad-vocabulary hit
-        // must not lead a code question. Applied to content and filename hits
-        // alike, after all scores are final and before ranking.
+        // Sink prose and project metadata below matching implementation source.
+        // Both remain retrievable when they are the only or strongest evidence.
         for hit in &mut hits {
-            if hit.score > 0 && is_prose_path(&hit.path) {
+            if hit.score == 0 {
+                continue;
+            }
+            if is_prose_path(&hit.path) {
                 hit.score = (hit.score * PROSE_SCORE_NUM / PROSE_SCORE_DEN).max(1);
+            } else if is_project_metadata_path(&hit.path) {
+                hit.score = (hit.score * METADATA_SCORE_NUM / METADATA_SCORE_DEN).max(1);
             }
         }
         hits.sort_by(|left, right| {
@@ -696,6 +729,25 @@ fn is_prose_path(path: &str) -> bool {
     PROSE_STEMS.contains(&stem)
 }
 
+fn is_project_metadata_path(path: &str) -> bool {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if PROJECT_METADATA_NAMES.contains(&name.as_str()) {
+        return true;
+    }
+
+    let json_config = name.ends_with(".json") || name.ends_with(".jsonc");
+    if json_config && (name.starts_with("tsconfig") || name.starts_with("jsconfig")) {
+        return true;
+    }
+
+    name.contains(".config.")
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -944,6 +996,43 @@ mod tests {
         assert!(hits.iter().any(|hit| hit.path.contains("src/config.js")));
         assert!(hits.iter().all(|hit| !hit.path.contains("node_modules")));
         assert!(hits.iter().all(|hit| !hit.path.contains(".env")));
+    }
+
+    #[test]
+    fn project_metadata_ranks_below_matching_source_but_remains_retrievable() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/handler.ts"), "const marker = true;\n").unwrap();
+        fs::write(
+            root.path().join("package.json"),
+            r#"{ "marker": true, "description": "marker" }"#,
+        )
+        .unwrap();
+        fs::write(root.path().join("tsconfig.build.json"), r#"{ "marker": true }"#).unwrap();
+
+        let hits = RipgrepSearch
+            .search(root.path(), "marker", 20, &[])
+            .unwrap();
+
+        assert_eq!(
+            hits.first().map(|hit| hit.path.as_str()),
+            Some("src/handler.ts")
+        );
+        assert!(hits.iter().any(|hit| hit.path == "package.json"));
+        assert!(hits.iter().any(|hit| hit.path == "tsconfig.build.json"));
+    }
+
+    #[test]
+    fn project_metadata_detection_is_bounded_to_known_manifest_shapes() {
+        use super::is_project_metadata_path;
+
+        assert!(is_project_metadata_path("package.json"));
+        assert!(is_project_metadata_path("workspace/tsconfig.build.json"));
+        assert!(is_project_metadata_path("eslint.config.mjs"));
+        assert!(is_project_metadata_path("Cargo.toml"));
+        assert!(!is_project_metadata_path("src/config.ts"));
+        assert!(!is_project_metadata_path("src/package-manager.ts"));
+        assert!(!is_project_metadata_path("src/metadata.json"));
     }
 
     #[test]
