@@ -30,6 +30,17 @@ At file level, agent-shunt reached **78% File-Hit@5 and 0.611 MRR**, versus **74
 
 These are **estimated source-context tokens**, not provider billing tokens or measured API cost. Repositories, commits, evaluator code, CI runs, caveats, and the machine-readable snapshot are public in [`eval/RESULTS.md`](eval/RESULTS.md) and [`eval/results/2026-09-17.json`](eval/results/2026-09-17.json).
 
+### Semantic retrieval quality
+
+The opt-in local semantic path was evaluated on the **same 50 questions, pinned repositories, and 1,200-token budget** using `bge-small-en-v1.5` with dense top-k 24.
+
+| Strategy | Hit@1 | Hit@3 | Hit@5 | MRR |
+| --- | ---: | ---: | ---: | ---: |
+| lexical | **50%** | 74% | 78% | 0.602 |
+| local semantic | **50%** | **84%** | **88%** | **0.662** |
+
+The confidence-gated semantic path keeps aggregate Hit@1 unchanged while adding **10 percentage points at Hit@3 and Hit@5** and improving MRR by **0.060**. It is not uniformly better on every repository: on ripgrep, Hit@3 moves from 80% to 70%, while Hit@5 stays at 90% and MRR improves slightly from 0.587 to 0.595. Per-repository results and reproduction instructions are in [`eval/RESULTS.md`](eval/RESULTS.md).
+
 ## Two paths
 
 **Local and free.** `retrieve` searches your code and returns ranked, line-numbered chunks within a strict token budget. A chunk that doesn't fit is not included — the budget is real. Chunks snap to their enclosing block instead of a fixed line window, near-duplicate and padding lines are dropped, and no single file is allowed to flood the budget — so the evidence stays dense and on-target.
@@ -102,9 +113,9 @@ agent-shunt retrieve --analyze --question "Where is auth enforced?" --dir .
 agent-shunt retrieve --expand --question "Where is auth enforced?" --dir .
 
 # Opt-in hybrid retrieval: a persistent embedding index recalls chunks from
-# across the whole repo by meaning, fused with the local lexical ranking, so
-# relevant code surfaces even from files the term search never hit. Needs an
-# embeddingModel in config; vectors are cached on disk per file + model.
+# across the whole repo by meaning. The lexical head stays authoritative and a
+# confidence-gated semantic region can compete with the weak lexical tail.
+# Needs an embeddingModel in config; vectors are cached on disk per file + model.
 agent-shunt retrieve --semantic --question "Where is auth enforced?" --dir .
 
 # Opt-in precise re-ranking: the worker model scores the top candidates for
