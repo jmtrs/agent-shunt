@@ -17,7 +17,7 @@ use agent_shunt::{
             MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, execute_with_resolver,
         },
     },
-    domain::{Limits, RetrievedChunk},
+    domain::{DenseHit, Limits, RetrievedChunk},
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -89,6 +89,27 @@ struct CaseResult {
     delivered_tokens: usize,
     chunks: usize,
     latency_ms: f64,
+    selected_chunks: Vec<ChunkDebug>,
+    dense_candidates: Vec<DenseCandidateDebug>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChunkDebug {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    score: usize,
+    source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DenseCandidateDebug {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    similarity: f32,
 }
 
 fn main() -> Result<ExitCode> {
@@ -275,6 +296,15 @@ fn run_strategy(
     let mut results = Vec::with_capacity(corpus.cases.len());
 
     for case in &corpus.cases {
+        let dense_candidates = if let Some(index) = index {
+            let recall = index
+                .recall(&case.question, root, &corpus.globs, &Limits::default())
+                .with_context(|| format!("dense diagnostics failed case {}", case.id))?;
+            distinct_dense_candidates(&recall.hits, 5)
+        } else {
+            Vec::new()
+        };
+
         let started = Instant::now();
         let (result, _) = execute_with_resolver(
             &RipgrepSearch,
@@ -296,7 +326,7 @@ fn run_strategy(
                 mmr_lambda: MMR_LAMBDA,
                 max_block_lines: MAX_BLOCK_LINES,
                 min_score_percent: MIN_SCORE_PERCENT,
-                why: false,
+                why: index.is_some(),
                 prf: false,
                 review: false,
             },
@@ -309,6 +339,18 @@ fn run_strategy(
             delivered_tokens: result.estimated_tokens,
             chunks: result.chunks.len(),
             latency_ms: duration_ms(started.elapsed()),
+            selected_chunks: result
+                .chunks
+                .iter()
+                .map(|chunk| ChunkDebug {
+                    path: chunk.path.clone(),
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    score: chunk.score,
+                    source: chunk.source.clone(),
+                })
+                .collect(),
+            dense_candidates,
         });
     }
 
@@ -360,6 +402,26 @@ fn run_strategy(
         p95_latency_ms: latencies[p95_index],
         results,
     })
+}
+
+fn distinct_dense_candidates(hits: &[DenseHit], limit: usize) -> Vec<DenseCandidateDebug> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut candidates = Vec::new();
+    for hit in hits {
+        if !seen.insert(hit.path.clone()) {
+            continue;
+        }
+        candidates.push(DenseCandidateDebug {
+            path: hit.path.clone(),
+            start_line: hit.range.start_line,
+            end_line: hit.range.end_line,
+            similarity: hit.similarity,
+        });
+        if candidates.len() >= limit {
+            break;
+        }
+    }
+    candidates
 }
 
 fn first_relevant_rank(chunks: &[RetrievedChunk], expected: &[ExpectedEvidence]) -> Option<usize> {
