@@ -494,67 +494,21 @@ pub fn execute_with_resolver(
         });
     }
 
-    // Maximal Marginal Relevance ordering: greedily take the chunk that best
-    // trades relevance against redundancy with what is already chosen, so a
-    // second near-identical chunk (boilerplate duplicated across files, or
-    // another hit in an already-represented file) yields its slot to fresh
-    // evidence. Same-path pairs carry a floor similarity, which reproduces the
-    // previous one-per-path-first recall spread — a faintly-ranked expected file
-    // still leads its neighbour's repeats — without a separate pass.
-    let token_sets = candidates
+    // MMR and budget packing are one greedy decision. Only chunks that can
+    // actually be delivered are allowed to influence redundancy. Computing a
+    // complete MMR order first creates "ghost redundancy": an oversized chunk
+    // can push same-file evidence down even when that chunk is later skipped by
+    // the token budget.
+    let selected = select_candidates(
+        &candidates,
+        max_score,
+        input.budget_tokens,
+        input.mmr_lambda,
+    );
+    let total_tokens = selected
         .iter()
-        .map(|candidate| content_tokens(&candidate.content))
-        .collect::<Vec<_>>();
-    let max_score_f = max_score.max(1) as f64;
-    let mut remaining = (0..candidates.len()).collect::<Vec<_>>();
-    let mut order = Vec::with_capacity(candidates.len());
-    while !remaining.is_empty() {
-        let mut best_position = 0;
-        let mut best_value = f64::NEG_INFINITY;
-        for (position, &candidate) in remaining.iter().enumerate() {
-            let relevance = candidates[candidate].score as f64 / max_score_f;
-            let redundancy = order
-                .iter()
-                .map(|&chosen| similarity(candidate, chosen, &candidates, &token_sets))
-                .fold(0.0_f64, f64::max);
-            let value = input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
-            // Strict improvement keeps the earliest (higher-scoring, path-sorted)
-            // candidate on ties, so ordering stays deterministic.
-            if value > best_value + f64::EPSILON {
-                best_value = value;
-                best_position = position;
-            }
-        }
-        order.push(remaining.remove(best_position));
-    }
-    let diverse = order
-        .into_iter()
-        .map(|index| candidates[index].clone())
-        .collect::<Vec<_>>();
-    // Per-file depth cap: past its first (diversity-guaranteed) slot, one file
-    // may contribute at most this many chunks. A file that merely *uses* a
-    // heavily-repeated query term (`credential` scattered across a consumer
-    // module) otherwise takes a dozen slots of budget away from the file that
-    // actually answers the question, even when the budget is not exhausted.
-    // The cap frees that budget; omitted chunks still mark the result truncated.
-    let mut selected = Vec::new();
-    let mut total_tokens = 0;
-    let mut per_file: BTreeMap<String, usize> = BTreeMap::new();
-    for candidate in diverse {
-        let count = per_file.entry(candidate.path.clone()).or_default();
-        if *count >= MAX_CHUNKS_PER_FILE {
-            continue;
-        }
-        if total_tokens + candidate.estimated_tokens > input.budget_tokens {
-            continue;
-        }
-        *count += 1;
-        total_tokens += candidate.estimated_tokens;
-        selected.push(candidate);
-        if total_tokens >= input.budget_tokens {
-            break;
-        }
-    }
+        .map(|candidate| candidate.estimated_tokens)
+        .sum();
 
     let selected_documents = documents_from_chunks(&selected, &loaded.documents);
     Ok((
@@ -568,6 +522,67 @@ pub fn execute_with_resolver(
         },
         selected_documents,
     ))
+}
+
+fn select_candidates(
+    candidates: &[RetrievedChunk],
+    max_score: usize,
+    budget_tokens: usize,
+    mmr_lambda: f64,
+) -> Vec<RetrievedChunk> {
+    let token_sets = candidates
+        .iter()
+        .map(|candidate| content_tokens(&candidate.content))
+        .collect::<Vec<_>>();
+    let max_score_f = max_score.max(1) as f64;
+    let mut remaining = (0..candidates.len()).collect::<Vec<_>>();
+    let mut selected_indices = Vec::with_capacity(candidates.len());
+    let mut selected = Vec::new();
+    let mut total_tokens = 0usize;
+    let mut per_file: BTreeMap<String, usize> = BTreeMap::new();
+
+    while !remaining.is_empty() {
+        let mut best: Option<(usize, f64)> = None;
+
+        for (position, &candidate) in remaining.iter().enumerate() {
+            let item = &candidates[candidate];
+            if per_file.get(&item.path).copied().unwrap_or(0) >= MAX_CHUNKS_PER_FILE {
+                continue;
+            }
+            if total_tokens.saturating_add(item.estimated_tokens) > budget_tokens {
+                continue;
+            }
+
+            let relevance = item.score as f64 / max_score_f;
+            let redundancy = selected_indices
+                .iter()
+                .map(|&chosen| similarity(candidate, chosen, candidates, &token_sets))
+                .fold(0.0_f64, f64::max);
+            let value = mmr_lambda * relevance - (1.0 - mmr_lambda) * redundancy;
+
+            // Strict improvement keeps the earliest candidate on ties. The
+            // incoming list is score/path sorted, so selection stays stable.
+            if best.is_none_or(|(_, best_value)| value > best_value + f64::EPSILON) {
+                best = Some((position, value));
+            }
+        }
+
+        let Some((best_position, _)) = best else {
+            break;
+        };
+        let candidate = remaining.remove(best_position);
+        let item = &candidates[candidate];
+        *per_file.entry(item.path.clone()).or_default() += 1;
+        total_tokens += item.estimated_tokens;
+        selected_indices.push(candidate);
+        selected.push(item.clone());
+
+        if total_tokens >= budget_tokens {
+            break;
+        }
+    }
+
+    selected
 }
 
 // Wiring requires the full adapter set plus input and model chain; collapsing
@@ -636,6 +651,7 @@ mod tests {
     use super::{
         ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, decode_terms,
         estimate_tokens, execute, fuse_dense, identifier_tokens, is_compound_identifier,
+        select_candidates,
     };
 
     #[test]
@@ -696,6 +712,48 @@ mod tests {
             .map(|candidate| candidate.path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(order, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn budget_skipped_candidate_cannot_create_ghost_redundancy() {
+        let chunk =
+            |path: &str, score: usize, estimated_tokens: usize, content: &str| RetrievedChunk {
+                path: path.to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score,
+                estimated_tokens,
+                content: content.to_owned(),
+                source: None,
+                matched_terms: None,
+            };
+
+        // The high-scoring dense-sized candidate shares a path with the smaller
+        // lexical target but cannot fit after the head. It must not suppress the
+        // lexical target through same-path redundancy when it will never be
+        // delivered.
+        let candidates = vec![
+            chunk("head.rs", 100, 60, "head"),
+            chunk("target.rs", 90, 60, "large dense region"),
+            chunk("target.rs", 85, 30, "small lexical target"),
+            chunk("other.rs", 80, 30, "other"),
+            chunk("tail.rs", 10, 10, "tail"),
+        ];
+
+        let selected = select_candidates(&candidates, 100, 100, MMR_LAMBDA);
+        let paths = selected
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["head.rs", "target.rs", "tail.rs"]);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|candidate| candidate.estimated_tokens)
+                .sum::<usize>(),
+            100
+        );
     }
 
     struct MockExpander(Vec<String>);

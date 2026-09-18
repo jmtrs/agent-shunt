@@ -13,7 +13,7 @@
   ],
   "budgetTokens": 1200,
   "contextLines": 8,
-  "validationRun": 35335856826,
+  "validationRun": 35340803415,
   "strategies": {
     "agentShuntLexical": "Production lexical retrieval.",
     "rgWindow": "Plain ripgrep file ranking; best hit from each ranked file is read before deeper hits, using bounded fixed windows.",
@@ -27,8 +27,8 @@
         "5": 0.84
       },
       "mrr": 0.619,
-      "totalTokens": 51445,
-      "avgTokens": 1028.9
+      "totalTokens": 51304,
+      "avgTokens": 1026.08
     },
     "rgWindow": {
       "hitAt": {
@@ -93,7 +93,7 @@
           "5": 0.7
         },
         "mrr": 0.6333333333333333,
-        "totalTokens": 11415
+        "totalTokens": 11377
       },
       "rgWindow": {
         "hitAt": {
@@ -124,7 +124,7 @@
           "5": 0.9
         },
         "mrr": 0.5,
-        "totalTokens": 9583
+        "totalTokens": 9571
       },
       "rgWindow": {
         "hitAt": {
@@ -155,7 +155,7 @@
           "5": 1
         },
         "mrr": 0.925,
-        "totalTokens": 11039
+        "totalTokens": 11007
       },
       "rgWindow": {
         "hitAt": {
@@ -186,7 +186,7 @@
           "5": 0.7
         },
         "mrr": 0.45,
-        "totalTokens": 9342
+        "totalTokens": 9283
       },
       "rgWindow": {
         "hitAt": {
