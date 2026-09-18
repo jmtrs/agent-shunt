@@ -8,12 +8,12 @@ use std::{
 use agent_shunt::{
     adapters::{filesystem::SecureFilesystem, git::GitChangeSource, ripgrep::RipgrepSearch},
     application::{
-        ports::{CodeSearch, DocumentLoader},
+        ports::{CodeSearch, DocumentLoader, StructureResolver},
         retrieve::{
             MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, execute_with_resolver,
         },
     },
-    domain::{Limits, RetrievedChunk},
+    domain::{Document, Limits, LineRange, RetrievedChunk},
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,25 @@ struct RgFileScore {
     matching_lines: usize,
 }
 
+#[derive(Debug, Clone)]
+struct RgHit {
+    path: String,
+    line: usize,
+    matched_terms: usize,
+}
+
+#[derive(Debug)]
+struct RgRanking {
+    files: Vec<String>,
+    hits: Vec<RgHit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TargetedReadMode {
+    Window,
+    Symbol,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
@@ -117,7 +136,13 @@ struct Report {
     agent_file_mrr: f64,
     rg_file_hit_at: BTreeMap<usize, f64>,
     rg_file_mrr: f64,
+    rg_window_hit_at: BTreeMap<usize, f64>,
+    rg_window_mrr: f64,
+    rg_symbol_hit_at: BTreeMap<usize, f64>,
+    rg_symbol_mrr: f64,
     total_agent_tokens: usize,
+    total_rg_window_tokens: usize,
+    total_rg_symbol_tokens: usize,
     total_rg_top1_tokens: usize,
     total_rg_top3_tokens: usize,
     total_rg_top5_tokens: usize,
@@ -128,6 +153,8 @@ struct Report {
     agent_vs_rg_top3_compression: f64,
     agent_vs_rg_top5_compression: f64,
     avg_agent_tokens: f64,
+    avg_rg_window_tokens: f64,
+    avg_rg_symbol_tokens: f64,
     avg_rg_top1_tokens: f64,
     avg_rg_top3_tokens: f64,
     avg_rg_top5_tokens: f64,
@@ -146,7 +173,11 @@ struct CaseResult {
     agent_chunk_first_relevant_rank: Option<usize>,
     agent_file_first_relevant_rank: Option<usize>,
     rg_file_first_relevant_rank: Option<usize>,
+    rg_window_first_relevant_rank: Option<usize>,
+    rg_symbol_first_relevant_rank: Option<usize>,
     agent_tokens: usize,
+    rg_window_tokens: usize,
+    rg_symbol_tokens: usize,
     rg_top1_tokens: usize,
     rg_top3_tokens: usize,
     rg_top5_tokens: usize,
@@ -247,10 +278,31 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
 
         let agent_files = distinct_chunk_paths(&agent.chunks);
         let terms = search.terms(&case.question);
-        let rg_files = raw_rg_ranked_files(root, &terms, &corpus.globs)
+        let rg = raw_rg_ranking(root, &terms, &corpus.globs)
             .with_context(|| format!("plain ripgrep baseline failed case {}", case.id))?;
-        let rg_top5 = rg_files.iter().take(5).cloned().collect::<Vec<_>>();
+        let rg_top5 = rg.files.iter().take(5).cloned().collect::<Vec<_>>();
         let rg_tokens = whole_file_tokens(root, &loader, &rg_top5)?;
+
+        let rg_window = targeted_rg_chunks(
+            root,
+            &loader,
+            &resolver,
+            &rg.hits,
+            corpus.budget_tokens,
+            corpus.context_lines,
+            MAX_BLOCK_LINES,
+            TargetedReadMode::Window,
+        )?;
+        let rg_symbol = targeted_rg_chunks(
+            root,
+            &loader,
+            &resolver,
+            &rg.hits,
+            corpus.budget_tokens,
+            corpus.context_lines,
+            MAX_BLOCK_LINES,
+            TargetedReadMode::Symbol,
+        )?;
 
         let rg_top1_tokens = cumulative_at(&rg_tokens, 1);
         let rg_top3_tokens = cumulative_at(&rg_tokens, 3);
@@ -263,13 +315,17 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
                 &case.expected,
             ),
             agent_file_first_relevant_rank: first_relevant_file_rank(&agent_files, &case.expected),
-            rg_file_first_relevant_rank: first_relevant_file_rank(&rg_files, &case.expected),
+            rg_file_first_relevant_rank: first_relevant_file_rank(&rg.files, &case.expected),
+            rg_window_first_relevant_rank: first_relevant_chunk_rank(&rg_window, &case.expected),
+            rg_symbol_first_relevant_rank: first_relevant_chunk_rank(&rg_symbol, &case.expected),
             agent_tokens: agent.estimated_tokens,
+            rg_window_tokens: rg_window.iter().map(|chunk| chunk.estimated_tokens).sum(),
+            rg_symbol_tokens: rg_symbol.iter().map(|chunk| chunk.estimated_tokens).sum(),
             rg_top1_tokens,
             rg_top3_tokens,
             rg_top5_tokens,
             agent_vs_rg_top5_reduction_pct: reduction_pct(agent.estimated_tokens, rg_top5_tokens),
-            rg_matched_files: rg_files.len(),
+            rg_matched_files: rg.files.len(),
             rg_top5_files: rg_top5,
         });
     }
@@ -277,11 +333,17 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
     let agent_chunk_hit_at = hit_at(&results, |r| r.agent_chunk_first_relevant_rank);
     let agent_file_hit_at = hit_at(&results, |r| r.agent_file_first_relevant_rank);
     let rg_file_hit_at = hit_at(&results, |r| r.rg_file_first_relevant_rank);
+    let rg_window_hit_at = hit_at(&results, |r| r.rg_window_first_relevant_rank);
+    let rg_symbol_hit_at = hit_at(&results, |r| r.rg_symbol_first_relevant_rank);
     let agent_chunk_mrr = mrr(&results, |r| r.agent_chunk_first_relevant_rank);
     let agent_file_mrr = mrr(&results, |r| r.agent_file_first_relevant_rank);
     let rg_file_mrr = mrr(&results, |r| r.rg_file_first_relevant_rank);
+    let rg_window_mrr = mrr(&results, |r| r.rg_window_first_relevant_rank);
+    let rg_symbol_mrr = mrr(&results, |r| r.rg_symbol_first_relevant_rank);
 
     let total_agent_tokens = results.iter().map(|r| r.agent_tokens).sum();
+    let total_rg_window_tokens = results.iter().map(|r| r.rg_window_tokens).sum();
+    let total_rg_symbol_tokens = results.iter().map(|r| r.rg_symbol_tokens).sum();
     let total_rg_top1_tokens = results.iter().map(|r| r.rg_top1_tokens).sum();
     let total_rg_top3_tokens = results.iter().map(|r| r.rg_top3_tokens).sum();
     let total_rg_top5_tokens = results.iter().map(|r| r.rg_top5_tokens).sum();
@@ -307,7 +369,13 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
         agent_file_mrr,
         rg_file_hit_at,
         rg_file_mrr,
+        rg_window_hit_at,
+        rg_window_mrr,
+        rg_symbol_hit_at,
+        rg_symbol_mrr,
         total_agent_tokens,
+        total_rg_window_tokens,
+        total_rg_symbol_tokens,
         total_rg_top1_tokens,
         total_rg_top3_tokens,
         total_rg_top5_tokens,
@@ -318,6 +386,8 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
         agent_vs_rg_top3_compression: compression_ratio(total_agent_tokens, total_rg_top3_tokens),
         agent_vs_rg_top5_compression: compression_ratio(total_agent_tokens, total_rg_top5_tokens),
         avg_agent_tokens: total_agent_tokens as f64 / count,
+        avg_rg_window_tokens: total_rg_window_tokens as f64 / count,
+        avg_rg_symbol_tokens: total_rg_symbol_tokens as f64 / count,
         avg_rg_top1_tokens: total_rg_top1_tokens as f64 / count,
         avg_rg_top3_tokens: total_rg_top3_tokens as f64 / count,
         avg_rg_top5_tokens: total_rg_top5_tokens as f64 / count,
@@ -334,9 +404,12 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
     })
 }
 
-fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Result<Vec<String>> {
+fn raw_rg_ranking(root: &Path, terms: &[String], globs: &[String]) -> Result<RgRanking> {
     if terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RgRanking {
+            files: Vec::new(),
+            hits: Vec::new(),
+        });
     }
 
     let pattern = terms
@@ -378,6 +451,7 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
         .map(|term| term.to_lowercase())
         .collect::<Vec<_>>();
     let mut scores = HashMap::<String, RgFileScore>::new();
+    let mut hits = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -391,20 +465,32 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
         else {
             continue;
         };
+        let Some(line_number) = event
+            .pointer("/data/line_number")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            continue;
+        };
         let text = event
             .pointer("/data/lines/text")
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_lowercase();
-        let score = scores
-            .entry(path.strip_prefix("./").unwrap_or(path).to_owned())
-            .or_default();
+        let path = path.strip_prefix("./").unwrap_or(path).to_owned();
+        let matched = lowered_terms
+            .iter()
+            .enumerate()
+            .filter_map(|(index, term)| text.contains(term).then_some(index))
+            .collect::<Vec<_>>();
+        let score = scores.entry(path.clone()).or_default();
         score.matching_lines += 1;
-        for (index, term) in lowered_terms.iter().enumerate() {
-            if text.contains(term) {
-                score.matched_terms.insert(index);
-            }
-        }
+        score.matched_terms.extend(matched.iter().copied());
+        hits.push(RgHit {
+            path,
+            line: line_number,
+            matched_terms: matched.len(),
+        });
     }
 
     let mut ranked = scores.into_iter().collect::<Vec<_>>();
@@ -416,7 +502,116 @@ fn raw_rg_ranked_files(root: &Path, terms: &[String], globs: &[String]) -> Resul
             .then_with(|| right.matching_lines.cmp(&left.matching_lines))
             .then_with(|| left_path.cmp(right_path))
     });
-    Ok(ranked.into_iter().map(|(path, _)| path).collect())
+
+    let files = ranked
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let file_rank = files
+        .iter()
+        .enumerate()
+        .map(|(rank, path)| (path.as_str(), rank))
+        .collect::<HashMap<_, _>>();
+    hits.sort_by(|left, right| {
+        file_rank[&left.path.as_str()]
+            .cmp(&file_rank[&right.path.as_str()])
+            .then_with(|| right.matched_terms.cmp(&left.matched_terms))
+            .then_with(|| left.line.cmp(&right.line))
+    });
+    hits.dedup_by(|left, right| left.path == right.path && left.line == right.line);
+
+    Ok(RgRanking { files, hits })
+}
+
+fn targeted_rg_chunks(
+    root: &Path,
+    loader: &SecureFilesystem,
+    resolver: &dyn StructureResolver,
+    hits: &[RgHit],
+    budget_tokens: usize,
+    context_lines: usize,
+    max_block_lines: usize,
+    mode: TargetedReadMode,
+) -> Result<Vec<RetrievedChunk>> {
+    let mut documents = HashMap::<String, Document>::new();
+    let mut selected = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for (rank, hit) in hits.iter().enumerate() {
+        if !documents.contains_key(&hit.path) {
+            let loaded = loader.load(root, &[PathBuf::from(&hit.path)], &Limits::default())?;
+            let Some(document) = loaded.documents.into_iter().next() else {
+                continue;
+            };
+            documents.insert(hit.path.clone(), document);
+        }
+        let document = &documents[&hit.path];
+        if hit.line == 0 || hit.line > document.line_count {
+            continue;
+        }
+
+        let window = LineRange {
+            start_line: hit.line.saturating_sub(context_lines).max(1),
+            end_line: hit
+                .line
+                .saturating_add(context_lines)
+                .min(document.line_count),
+        };
+        let range = match mode {
+            TargetedReadMode::Window => window,
+            TargetedReadMode::Symbol => resolver
+                .enclosing_block(
+                    Path::new(&document.path),
+                    &document.lines,
+                    hit.line,
+                    max_block_lines,
+                )
+                .unwrap_or(window),
+        };
+        let range = document.trim_trivial(range);
+
+        if selected.iter().any(|chunk: &RetrievedChunk| {
+            chunk.path == hit.path
+                && chunk.start_line <= range.end_line
+                && range.start_line <= chunk.end_line
+        }) {
+            continue;
+        }
+
+        let mut content = document.numbered_range(range);
+        let mut estimated_tokens = delivered_tokens(&content, &hit.path);
+        let (range, content_tokens) = if estimated_tokens > budget_tokens
+            && matches!(mode, TargetedReadMode::Symbol)
+        {
+            let fallback = document.trim_trivial(window);
+            content = document.numbered_range(fallback);
+            estimated_tokens = delivered_tokens(&content, &hit.path);
+            (fallback, estimated_tokens)
+        } else {
+            (range, estimated_tokens)
+        };
+        estimated_tokens = content_tokens;
+
+        if estimated_tokens > budget_tokens
+            || total_tokens.saturating_add(estimated_tokens) > budget_tokens
+        {
+            continue;
+        }
+
+        total_tokens += estimated_tokens;
+        selected.push(RetrievedChunk {
+            path: hit.path.clone(),
+            start_line: range.start_line,
+            end_line: range.end_line,
+            score: hits.len().saturating_sub(rank),
+            estimated_tokens,
+            content,
+            source: None,
+            matched_terms: None,
+        });
+    }
+
+    Ok(selected)
 }
 
 fn whole_file_tokens(
@@ -639,8 +834,27 @@ fn print_human(report: &Report, repository: Option<&RepositorySpec>) {
         report.rg_file_mrr
     );
     println!(
-        "context totals: agent={} rg-top1={} rg-top3={} rg-top5={}",
+        "rg + window quality: hit@1={:.3} hit@3={:.3} hit@5={:.3} MRR={:.3}",
+        report.rg_window_hit_at[&1],
+        report.rg_window_hit_at[&3],
+        report.rg_window_hit_at[&5],
+        report.rg_window_mrr
+    );
+    println!(
+        "rg + symbol quality: hit@1={:.3} hit@3={:.3} hit@5={:.3} MRR={:.3}",
+        report.rg_symbol_hit_at[&1],
+        report.rg_symbol_hit_at[&3],
+        report.rg_symbol_hit_at[&5],
+        report.rg_symbol_mrr
+    );
+    println!(
+        "budgeted context: agent={} rg-window={} rg-symbol={}",
         report.total_agent_tokens,
+        report.total_rg_window_tokens,
+        report.total_rg_symbol_tokens
+    );
+    println!(
+        "whole-file context: rg-top1={} rg-top3={} rg-top5={}",
         report.total_rg_top1_tokens,
         report.total_rg_top3_tokens,
         report.total_rg_top5_tokens
@@ -655,8 +869,10 @@ fn print_human(report: &Report, repository: Option<&RepositorySpec>) {
         report.agent_vs_rg_top5_compression
     );
     println!(
-        "per-case: avg agent={:.1} avg rg top5={:.1} median top5 reduction={:.1}% p95 agent={} p95 rg top5={} avg rg matches={:.1} no-match={}",
+        "per-case: avg agent={:.1} avg rg-window={:.1} avg rg-symbol={:.1} avg rg top5={:.1} median top5 reduction={:.1}% p95 agent={} p95 rg top5={} avg rg matches={:.1} no-match={}",
         report.avg_agent_tokens,
+        report.avg_rg_window_tokens,
+        report.avg_rg_symbol_tokens,
         report.avg_rg_top5_tokens,
         report.median_agent_vs_rg_top5_reduction_pct,
         report.p95_agent_tokens,
