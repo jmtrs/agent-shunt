@@ -11,6 +11,11 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 use crate::application::ports::Embedder;
 
+/// Bound local inference memory for large files/repositories. FastEmbed's
+/// automatic batch can be much larger than needed for CPU indexing and caused
+/// the ONNX runtime to be killed on a 246 KiB Rust source file in evaluation.
+const LOCAL_EMBED_BATCH_SIZE: usize = 32;
+
 /// A locally executing sentence-embedding model, loaded once and reused for
 /// every batch. `fastembed` fetches the weights into its own on-disk cache the
 /// first time a given model is requested, so construction may hit the network
@@ -38,9 +43,11 @@ impl Embedder for LocalEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        // fastembed batches internally; passing `None` lets it pick a batch size.
+        // Keep inference memory bounded instead of delegating to FastEmbed's
+        // larger automatic batch. Throughput remains batched, but indexing one
+        // large source file cannot allocate for hundreds of chunks at once.
         self.model
-            .embed(texts.to_vec(), None)
+            .embed(texts.to_vec(), Some(LOCAL_EMBED_BATCH_SIZE))
             .context("local embedding computation failed")
     }
 }
