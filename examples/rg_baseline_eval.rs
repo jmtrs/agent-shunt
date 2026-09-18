@@ -581,16 +581,15 @@ fn targeted_rg_chunks(
 
         let mut content = document.numbered_range(range);
         let mut estimated_tokens = delivered_tokens(&content, &hit.path);
-        let (range, content_tokens) = if estimated_tokens > budget_tokens
-            && matches!(mode, TargetedReadMode::Symbol)
-        {
-            let fallback = document.trim_trivial(window);
-            content = document.numbered_range(fallback);
-            estimated_tokens = delivered_tokens(&content, &hit.path);
-            (fallback, estimated_tokens)
-        } else {
-            (range, estimated_tokens)
-        };
+        let (range, content_tokens) =
+            if estimated_tokens > budget_tokens && matches!(mode, TargetedReadMode::Symbol) {
+                let fallback = document.trim_trivial(window);
+                content = document.numbered_range(fallback);
+                estimated_tokens = delivered_tokens(&content, &hit.path);
+                (fallback, estimated_tokens)
+            } else {
+                (range, estimated_tokens)
+            };
         estimated_tokens = content_tokens;
 
         if estimated_tokens > budget_tokens
@@ -850,15 +849,11 @@ fn print_human(report: &Report, repository: Option<&RepositorySpec>) {
     );
     println!(
         "budgeted context: agent={} rg-window={} rg-symbol={}",
-        report.total_agent_tokens,
-        report.total_rg_window_tokens,
-        report.total_rg_symbol_tokens
+        report.total_agent_tokens, report.total_rg_window_tokens, report.total_rg_symbol_tokens
     );
     println!(
         "whole-file context: rg-top1={} rg-top3={} rg-top5={}",
-        report.total_rg_top1_tokens,
-        report.total_rg_top3_tokens,
-        report.total_rg_top5_tokens
+        report.total_rg_top1_tokens, report.total_rg_top3_tokens, report.total_rg_top5_tokens
     );
     println!(
         "agent vs rg: top1={:.1}%/{:.2}x top3={:.1}%/{:.2}x top5={:.1}%/{:.2}x",
