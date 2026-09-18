@@ -168,10 +168,10 @@ measure the actual production fusion policy rather than a standalone vector
 search.
 
 The GitHub Actions `Semantic retrieval evaluation` workflow runs the same
-comparison across all five pinned external corpora. It runs repositories
-sequentially and reuses the model cache to avoid parallel first-use model
-downloads affecting reproducibility. Latency is informational only; Hit@K, MRR,
-and delivered context are the portable quality measurements.
+comparison across all five pinned external corpora. It runs at most two corpora
+in parallel and reuses both the model cache and per-corpus vector cache.
+Latency is informational only; Hit@K, MRR, and delivered context are the
+portable quality measurements.
 
 ## Gates
 
