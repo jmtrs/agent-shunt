@@ -19,7 +19,7 @@
     "localBatchSize": 32
   },
   "validationRuns": {
-    "matrix": 35336476560
+    "matrix": 35340803578
   },
   "aggregate": {
     "lexical": {
@@ -29,23 +29,23 @@
         "5": 0.84
       },
       "mrr": 0.619,
-      "avgTokens": 1028.9
+      "avgTokens": 1026.08
     },
     "semantic": {
       "hitAt": {
         "1": 0.5,
         "3": 0.82,
-        "5": 0.88
+        "5": 0.9
       },
-      "mrr": 0.6573333333333332,
-      "avgTokens": 1050.56
+      "mrr": 0.6623333333333333,
+      "avgTokens": 1047.82
     }
   },
   "corpora": {
     "ripgrep": {
       "language": "Rust",
       "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
-      "runId": 35336476560,
+      "runId": 35340803578,
       "lexical": {
         "hitAt": {
           "1": 0.4,
@@ -68,7 +68,7 @@
     "flask": {
       "language": "Python",
       "commit": "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35",
-      "runId": 35336476560,
+      "runId": 35340803578,
       "lexical": {
         "hitAt": {
           "1": 0.6,
@@ -76,7 +76,7 @@
           "5": 0.7
         },
         "mrr": 0.6333333333333333,
-        "avgTokens": 1141.5
+        "avgTokens": 1137.7
       },
       "semantic": {
         "hitAt": {
@@ -85,13 +85,13 @@
           "5": 0.9
         },
         "mrr": 0.75,
-        "avgTokens": 1129.5
+        "avgTokens": 1125.7
       }
     },
     "hono": {
       "language": "TypeScript",
       "commit": "098e11912ab244c5c33931de007f04dc8e3c2929",
-      "runId": 35336476560,
+      "runId": 35340803578,
       "lexical": {
         "hitAt": {
           "1": 0.3,
@@ -99,22 +99,22 @@
           "5": 0.9
         },
         "mrr": 0.5,
-        "avgTokens": 958.3
+        "avgTokens": 957.1
       },
       "semantic": {
         "hitAt": {
           "1": 0.3,
           "3": 0.7,
-          "5": 0.8
+          "5": 0.9
         },
-        "mrr": 0.475,
-        "avgTokens": 975.1
+        "mrr": 0.5,
+        "avgTokens": 974.3
       }
     },
     "cobra": {
       "language": "Go",
       "commit": "adbc8813901bba65827259daa8e22ff94ec1f30e",
-      "runId": 35336476560,
+      "runId": 35340803578,
       "lexical": {
         "hitAt": {
           "1": 0.9,
@@ -122,7 +122,7 @@
           "5": 1
         },
         "mrr": 0.925,
-        "avgTokens": 1103.9
+        "avgTokens": 1100.7
       },
       "semantic": {
         "hitAt": {
@@ -131,13 +131,13 @@
           "5": 1
         },
         "mrr": 0.95,
-        "avgTokens": 1117.5
+        "avgTokens": 1114.3
       }
     },
     "gson": {
       "language": "Java",
       "commit": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
-      "runId": 35336476560,
+      "runId": 35340803578,
       "lexical": {
         "hitAt": {
           "1": 0.3,
@@ -145,7 +145,7 @@
           "5": 0.7
         },
         "mrr": 0.45,
-        "avgTokens": 934.2
+        "avgTokens": 928.3
       },
       "semantic": {
         "hitAt": {
@@ -154,7 +154,7 @@
           "5": 0.8
         },
         "mrr": 0.5166666666666666,
-        "avgTokens": 977.9
+        "avgTokens": 972
       }
     }
   },
@@ -167,11 +167,11 @@
   "knownTradeoffs": [
     {
       "corpus": "ripgrep",
-      "description": "Hit@3 decreases from 0.80 to 0.70 while Hit@5 stays 0.90 and MRR increases from 0.587 to 0.595."
+      "description": "Semantic Hit@3 decreases from 0.80 to 0.70 while Hit@5 stays 0.90 and MRR increases from 0.587 to 0.595."
     },
     {
       "corpus": "hono",
-      "description": "After metadata down-ranking improves lexical retrieval to Hit@5 0.90 / MRR 0.500, semantic fusion falls to Hit@5 0.80 / MRR 0.475. Semantic recall is therefore not a universal improvement over the stronger lexical baseline."
+      "description": "Budget-aware MMR removes the former semantic regression: lexical and semantic both reach Hit@5 0.90 / MRR 0.500. Dense evidence that cannot fit no longer creates redundancy against deliverable lexical evidence."
     }
   ]
 }
