@@ -124,11 +124,14 @@ Use `agent-shunt check` for local configuration, `agent-shunt doctor` for depend
 
 On 50 human-authored questions across five pinned open-source repositories, all methods below had the same 1,200-token source-context budget:
 
-| Method | File-Hit@5 | MRR |
-| --- | ---: | ---: |
-| Local semantic (`bge-small-en-v1.5`) | **90%** | **0.662** |
-| Default lexical retrieval | 84% | 0.619 |
-| Targeted `rg` + fixed windows | 72% | 0.446 |
+| Method | Hit@1 | Hit@3 | Hit@5 | MRR | Avg. tokens/query |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Local semantic (`bge-small-en-v1.5`) | 50% | **82%** | **90%** | **0.662** | 1,047.8 |
+| Default lexical retrieval | 50% | 76% | 84% | 0.619 | **1,026.1** |
+| Targeted `rg` + fixed windows | 26% | 64% | 72% | 0.446 | 1,167.4 |
+| Targeted `rg` + enclosing symbols | 26% | 64% | 72% | 0.445 | 1,171.8 |
+
+Hit@k is the share of questions with a relevant source chunk in the first *k* results. MRR rewards relevant chunks appearing earlier; token counts estimate the source context delivered to the agent.
 
 Against reading the same selected files in full, default retrieval used **94.37% less estimated source context** in this benchmark. These results measure retrieval, not end-to-end coding-agent performance; individual repositories vary. See the [methods, per-repository results, and caveats](eval/RESULTS.md) and [machine-readable snapshots](eval/results/).
 
