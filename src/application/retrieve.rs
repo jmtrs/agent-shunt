@@ -651,6 +651,7 @@ mod tests {
     use super::{
         ChangeScope, MAX_BLOCK_LINES, MIN_SCORE_PERCENT, MMR_LAMBDA, RetrieveInput, decode_terms,
         estimate_tokens, execute, fuse_dense, identifier_tokens, is_compound_identifier,
+        select_candidates,
     };
 
     #[test]
@@ -711,6 +712,46 @@ mod tests {
             .map(|candidate| candidate.path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(order, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn budget_skipped_candidate_cannot_create_ghost_redundancy() {
+        let chunk = |path: &str, score: usize, estimated_tokens: usize, content: &str| {
+            RetrievedChunk {
+                path: path.to_owned(),
+                start_line: 1,
+                end_line: 1,
+                score,
+                estimated_tokens,
+                content: content.to_owned(),
+                source: None,
+                matched_terms: None,
+            }
+        };
+
+        // The high-scoring dense-sized candidate shares a path with the smaller
+        // lexical target but cannot fit after the head. It must not suppress the
+        // lexical target through same-path redundancy when it will never be
+        // delivered.
+        let candidates = vec![
+            chunk("head.rs", 100, 60, "head"),
+            chunk("target.rs", 90, 60, "large dense region"),
+            chunk("target.rs", 85, 30, "small lexical target"),
+            chunk("other.rs", 80, 30, "other"),
+            chunk("tail.rs", 10, 10, "tail"),
+        ];
+
+        let selected = select_candidates(&candidates, 100, 100, MMR_LAMBDA);
+        let paths = selected
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["head.rs", "target.rs", "tail.rs"]);
+        assert_eq!(
+            selected.iter().map(|candidate| candidate.estimated_tokens).sum::<usize>(),
+            100
+        );
     }
 
     struct MockExpander(Vec<String>);
