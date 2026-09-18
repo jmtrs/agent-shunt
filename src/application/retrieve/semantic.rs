@@ -82,22 +82,21 @@ pub(super) fn fuse_dense(
         return;
     };
 
-    let second_score = candidates
-        .get(1)
-        .map(|candidate| candidate.score)
-        .unwrap_or(top_score);
-
-    // Semantic recall is a side-channel for evidence that lexical retrieval is
-    // missing or underweighting. If the same file already has evidence at the
-    // score tier dense would receive, another region from that file is depth,
-    // not recall, and can only evict other strong lexical evidence.
+    // Semantic recall is for missing files, not additional depth inside a file
+    // lexical retrieval already found. Adding a second region from the same
+    // file can displace the original lexical region under MMR and a fixed token
+    // budget, even when that lexical region is the useful evidence.
     if candidates
         .iter()
-        .any(|candidate| candidate.path == dense_head_path && candidate.score >= second_score)
+        .any(|candidate| candidate.path == dense_head_path)
     {
         return;
     }
 
+    let second_score = candidates
+        .get(1)
+        .map(|candidate| candidate.score)
+        .unwrap_or(top_score);
     let dense_score = second_score.min(top_score - 1);
 
     // Dense hits arrive sorted by descending similarity. Only the confident
