@@ -40,6 +40,7 @@ pub(super) fn fuse_dense(
     hits: &[DenseHit],
     by_path: &BTreeMap<String, &Document>,
     budget: usize,
+    min_score_percent: usize,
     why: bool,
 ) {
     // When lexical retrieval found nothing, semantic recall is the only evidence
@@ -82,14 +83,16 @@ pub(super) fn fuse_dense(
         return;
     };
 
-    // Semantic recall is for missing files, not additional depth inside a file
-    // lexical retrieval already found. Adding a second region from the same
-    // file can displace the original lexical region under MMR and a fixed token
-    // budget, even when that lexical region is the useful evidence.
-    if candidates
-        .iter()
-        .any(|candidate| candidate.path == dense_head_path)
-    {
+    // Semantic recall is for evidence lexical retrieval would otherwise lose.
+    // A same-file lexical candidate only blocks dense depth when it is strong
+    // enough to survive the relevance floor. Very weak lexical matches are
+    // effectively absent after pruning, so semantic recall may still rescue
+    // that file.
+    if candidates.iter().any(|candidate| {
+        candidate.path == dense_head_path
+            && candidate.score.saturating_mul(100)
+                >= top_score.saturating_mul(min_score_percent)
+    }) {
         return;
     }
 
