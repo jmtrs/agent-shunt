@@ -48,7 +48,7 @@ The opt-in local semantic path uses the production confidence-gated fusion polic
 | Gson | 30% | 70% | 70% | 0.450 | 30% | **80%** | **80%** | **0.517** |
 | **Aggregate, 50 cases** | **50%** | 74% | 78% | 0.602 | **50%** | **84%** | **88%** | **0.662** |
 
-Aggregate Hit@1 is unchanged. Semantic retrieval adds **10 percentage points at Hit@3 and Hit@5** and improves MRR by about **0.060**.
+Aggregate Hit@1 is unchanged. Semantic retrieval adds **10 percentage points at Hit@3 and Hit@5** and improves MRR by about **0.060**. Average delivered context is **1,052.1 estimated tokens/query** for semantic retrieval versus **1,036.7** for lexical retrieval, a ~1.5% increase while remaining under the same 1,200-token cap.
 
 The result is intentionally not presented as a universal win. On ripgrep, `gitignore-matching` moves from rank 3 to rank 4 because semantic recall introduces `crates/ignore/src/incremental.rs`; `file-type-globs` moves from rank 3 to rank 2. As a result, ripgrep Hit@3 falls from 80% to 70%, while Hit@5 remains 90% and MRR rises slightly from 0.587 to 0.595. This trade-off is kept visible rather than tuning specifically to the benchmark case.
 
@@ -72,6 +72,8 @@ cargo run --release --features local-embed --example semantic_eval -- \
 ```
 
 The `Semantic retrieval evaluation` GitHub Actions workflow runs the same evaluator across all five pinned corpora and publishes each JSON report as an artifact.
+
+The published machine-readable summary is [`eval/results/2026-09-18-semantic.json`](results/2026-09-18-semantic.json). It records the final validation run IDs, per-corpus metrics, aggregate metrics, model settings, and caveats.
 
 ## 1. Same selected files in full
 
