@@ -508,10 +508,7 @@ pub fn execute_with_resolver(
     ))
 }
 
-fn select_candidates(
-    candidates: &[RetrievedChunk],
-    input: &RetrieveInput,
-) -> Vec<RetrievedChunk> {
+fn select_candidates(candidates: &[RetrievedChunk], input: &RetrieveInput) -> Vec<RetrievedChunk> {
     let mut candidates = candidates.to_vec();
 
     let max_score = candidates
@@ -520,8 +517,7 @@ fn select_candidates(
         .unwrap_or(0);
     if max_score > 0 {
         candidates.retain(|candidate| {
-            candidate.score.saturating_mul(100)
-                >= max_score.saturating_mul(input.min_score_percent)
+            candidate.score.saturating_mul(100) >= max_score.saturating_mul(input.min_score_percent)
         });
     }
 
@@ -541,8 +537,7 @@ fn select_candidates(
                 .iter()
                 .map(|&chosen| similarity(candidate, chosen, &candidates, &token_sets))
                 .fold(0.0_f64, f64::max);
-            let value =
-                input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
+            let value = input.mmr_lambda * relevance - (1.0 - input.mmr_lambda) * redundancy;
             if value > best_value + f64::EPSILON {
                 best_value = value;
                 best_position = position;
