@@ -82,23 +82,26 @@ pub(super) fn fuse_dense(
         return;
     };
 
-    let second_score = candidates
-        .get(1)
-        .map(|candidate| candidate.score)
-        .unwrap_or(top_score);
+    // Dense recall should challenge the weak half of the lexical ranking, not
+    // jump directly behind the lexical head. The lower-half boundary adapts to
+    // the number and spread of candidates without a benchmark-specific rank or
+    // score percentage. Subtract one so an admitted dense region never ties the
+    // lexical candidate that defines that boundary.
+    let middle_score = candidates[candidates.len() / 2].score;
+    let dense_score = middle_score
+        .saturating_sub(1)
+        .min(top_score.saturating_sub(1));
 
     // Semantic recall is a side-channel for evidence that lexical retrieval is
-    // missing or underweighting. If the same file already has evidence at the
-    // score tier dense would receive, another region from that file is depth,
-    // not recall, and can only evict other strong lexical evidence.
+    // missing or underweighting. If this file is already represented in the
+    // upper half of the lexical ranking, another region from it is depth rather
+    // than recall and must not consume fixed evidence budget.
     if candidates
         .iter()
-        .any(|candidate| candidate.path == dense_head_path && candidate.score >= second_score)
+        .any(|candidate| candidate.path == dense_head_path && candidate.score >= middle_score)
     {
         return;
     }
-
-    let dense_score = second_score.min(top_score - 1);
 
     // Dense hits arrive sorted by descending similarity. Only the confident
     // head file may contribute a region; falling through to a lower-ranked
