@@ -28,8 +28,9 @@ const RG_TOP_K: [usize; 3] = [1, 3, 5];
 
 // Keep the plain-rg baseline inside the same safe source universe as production
 // retrieval. Corpus-specific globs are applied first and these exclusions last.
-// The baseline intentionally does not use agent-shunt's filename/path boosts,
-// IDF weighting, AST chunking, MMR, PRF, or relevance pruning.
+// The baselines intentionally do not use agent-shunt's filename/path boosts,
+// IDF weighting, MMR, PRF, or relevance pruning. The symbol-read variant uses
+// only the shared StructureResolver after plain rg has already chosen the hit.
 const EXCLUDED_GLOBS: &[&str] = &[
     "!**/node_modules/**",
     "!**/target/**",
