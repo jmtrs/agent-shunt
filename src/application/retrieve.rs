@@ -885,7 +885,14 @@ mod tests {
             similarity: 0.9,
         }];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert_eq!(candidates[0].path, "a.rs");
         assert_eq!(candidates[0].score, 100);
@@ -927,7 +934,14 @@ mod tests {
             similarity: 0.95,
         }];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert!(
             candidates.iter().any(|candidate| candidate.path == "b.rs"),
@@ -983,7 +997,14 @@ mod tests {
             },
         ];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert!(candidates.iter().any(|candidate| candidate.path == "c.rs"));
         assert!(!candidates.iter().any(|candidate| candidate.path == "d.rs"));
@@ -1019,7 +1040,14 @@ mod tests {
             similarity: 0.9,
         }];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert_eq!(candidates[0].path, "a.rs");
         assert_eq!(candidates[0].score, 1);
@@ -1081,7 +1109,14 @@ mod tests {
             },
         ];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, "lexical.rs");
@@ -1135,7 +1170,14 @@ mod tests {
             },
         ];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert!(candidates.iter().any(|candidate| candidate.path == "a.rs"));
         assert!(!candidates.iter().any(|candidate| candidate.path == "b.rs"));
@@ -1201,7 +1243,14 @@ mod tests {
             },
         ];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(
@@ -1283,7 +1332,14 @@ mod tests {
             },
         ];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert_eq!(
             candidates
@@ -1416,7 +1472,14 @@ mod tests {
             },
         ];
 
-        fuse_dense(&mut candidates, &hits, &by_path, 10_000, MIN_SCORE_PERCENT, false);
+        fuse_dense(
+            &mut candidates,
+            &hits,
+            &by_path,
+            10_000,
+            MIN_SCORE_PERCENT,
+            false,
+        );
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, "a.rs");
