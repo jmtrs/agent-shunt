@@ -11,7 +11,10 @@ pub(super) fn decode_terms(mask: u16, terms: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn documents_from_chunks(chunks: &[RetrievedChunk], originals: &[Document]) -> Vec<Document> {
+pub(super) fn documents_from_chunks(
+    chunks: &[RetrievedChunk],
+    originals: &[Document],
+) -> Vec<Document> {
     let mut grouped: BTreeMap<&str, Vec<&RetrievedChunk>> = BTreeMap::new();
     for chunk in chunks {
         grouped.entry(&chunk.path).or_default().push(chunk);
