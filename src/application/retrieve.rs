@@ -26,7 +26,7 @@ use support::{
 #[cfg(test)]
 use prf::{identifier_tokens, is_compound_identifier};
 #[cfg(test)]
-use support::{estimate_tokens, jaccard};
+use support::estimate_tokens;
 
 #[derive(Debug, Clone)]
 pub struct RetrieveInput {
