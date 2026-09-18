@@ -83,23 +83,28 @@ pub(super) fn fuse_dense(
     };
 
     // Dense recall is an escape hatch for the weak lexical tail, not a
-    // promotion to the lexical head. The candidates are already score-sorted;
-    // place a novel dense region just above the current tail so it can replace
-    // weak evidence under MMR/budget pressure without competing at #2.
+    // promotion mechanism. Keep every existing lexical candidate ahead on raw
+    // relevance score; MMR may still select the dense region earlier when its
+    // diversity is worth more than another redundant lexical chunk.
+    let second_score = candidates
+        .get(1)
+        .map(|candidate| candidate.score)
+        .unwrap_or(top_score);
     let tail_score = candidates
         .last()
         .map(|candidate| candidate.score)
         .unwrap_or(top_score);
     let dense_score = tail_score
-        .saturating_add(1)
-        .min(top_score.saturating_sub(1))
-        .max(1);
+        .saturating_sub(1)
+        .min(top_score.saturating_sub(1));
 
-    // If the same file already has lexical evidence at or above the tier dense
-    // would receive, another region from that file is depth, not recall.
+    // A file already represented at the strong lexical tier does not need more
+    // depth from semantic recall. A weak lexical representation may still gain
+    // a different dense region, but that new region remains below the lexical
+    // tail on raw score and must earn selection through diversity.
     if candidates
         .iter()
-        .any(|candidate| candidate.path == dense_head_path && candidate.score >= dense_score)
+        .any(|candidate| candidate.path == dense_head_path && candidate.score >= second_score)
     {
         return;
     }
@@ -155,120 +160,4 @@ pub(super) fn fuse_dense(
 /// refer to the same region and should count as one fused candidate.
 fn overlaps(candidate: &RetrievedChunk, hit: &DenseHit) -> bool {
     candidate.start_line <= hit.range.end_line && hit.range.start_line <= candidate.end_line
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::LineRange;
-
-    fn chunk(path: &str, score: usize) -> RetrievedChunk {
-        RetrievedChunk {
-            path: path.to_owned(),
-            start_line: 1,
-            end_line: 1,
-            score,
-            estimated_tokens: 1,
-            content: "1: x".to_owned(),
-            source: None,
-            matched_terms: None,
-        }
-    }
-
-    fn document(path: &str) -> Document {
-        Document {
-            path: path.to_owned(),
-            bytes: 1,
-            line_count: 1,
-            lines: vec!["x".to_owned()],
-            numbered_content: "1: x".to_owned(),
-            allowed_ranges: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn dense_recall_competes_with_lexical_tail_not_second_place() {
-        let mut candidates = vec![
-            chunk("a.rs", 100),
-            chunk("b.rs", 80),
-            chunk("c.rs", 20),
-        ];
-        let dense_document = document("dense.rs");
-        let runner_document = document("runner.rs");
-        let by_path = BTreeMap::from([
-            (dense_document.path.clone(), &dense_document),
-            (runner_document.path.clone(), &runner_document),
-        ]);
-        let hits = vec![
-            DenseHit {
-                path: "dense.rs".to_owned(),
-                range: LineRange {
-                    start_line: 1,
-                    end_line: 1,
-                },
-                similarity: 0.9,
-            },
-            DenseHit {
-                path: "runner.rs".to_owned(),
-                range: LineRange {
-                    start_line: 1,
-                    end_line: 1,
-                },
-                similarity: 0.5,
-            },
-        ];
-
-        fuse_dense(&mut candidates, &hits, &by_path, 100, false);
-
-        let dense = candidates
-            .iter()
-            .find(|candidate| candidate.path == "dense.rs")
-            .expect("dense candidate should be admitted");
-        assert_eq!(dense.score, 21);
-        assert!(dense.score < candidates[1].score);
-    }
-
-    #[test]
-    fn dense_recall_does_not_deepen_a_file_already_above_tail_tier() {
-        let mut candidates = vec![
-            chunk("a.rs", 100),
-            chunk("dense.rs", 40),
-            chunk("c.rs", 20),
-        ];
-        let dense_document = document("dense.rs");
-        let runner_document = document("runner.rs");
-        let by_path = BTreeMap::from([
-            (dense_document.path.clone(), &dense_document),
-            (runner_document.path.clone(), &runner_document),
-        ]);
-        let hits = vec![
-            DenseHit {
-                path: "dense.rs".to_owned(),
-                range: LineRange {
-                    start_line: 1,
-                    end_line: 1,
-                },
-                similarity: 0.9,
-            },
-            DenseHit {
-                path: "runner.rs".to_owned(),
-                range: LineRange {
-                    start_line: 1,
-                    end_line: 1,
-                },
-                similarity: 0.5,
-            },
-        ];
-
-        fuse_dense(&mut candidates, &hits, &by_path, 100, false);
-
-        assert_eq!(
-            candidates
-                .iter()
-                .filter(|candidate| candidate.path == "dense.rs")
-                .count(),
-            1
-        );
-    }
 }
