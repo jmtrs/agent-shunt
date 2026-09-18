@@ -126,6 +126,14 @@ enum TargetedReadMode {
     Symbol,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TargetedReadConfig {
+    budget_tokens: usize,
+    context_lines: usize,
+    max_block_lines: usize,
+    mode: TargetedReadMode,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
@@ -289,20 +297,24 @@ fn run(root: &Path, corpus: &Corpus) -> Result<Report> {
             &loader,
             &resolver,
             &rg.hits,
-            corpus.budget_tokens,
-            corpus.context_lines,
-            MAX_BLOCK_LINES,
-            TargetedReadMode::Window,
+            TargetedReadConfig {
+                budget_tokens: corpus.budget_tokens,
+                context_lines: corpus.context_lines,
+                max_block_lines: MAX_BLOCK_LINES,
+                mode: TargetedReadMode::Window,
+            },
         )?;
         let rg_symbol = targeted_rg_chunks(
             root,
             &loader,
             &resolver,
             &rg.hits,
-            corpus.budget_tokens,
-            corpus.context_lines,
-            MAX_BLOCK_LINES,
-            TargetedReadMode::Symbol,
+            TargetedReadConfig {
+                budget_tokens: corpus.budget_tokens,
+                context_lines: corpus.context_lines,
+                max_block_lines: MAX_BLOCK_LINES,
+                mode: TargetedReadMode::Symbol,
+            },
         )?;
 
         let rg_top1_tokens = cumulative_at(&rg_tokens, 1);
@@ -529,10 +541,7 @@ fn targeted_rg_chunks(
     loader: &SecureFilesystem,
     resolver: &dyn StructureResolver,
     hits: &[RgHit],
-    budget_tokens: usize,
-    context_lines: usize,
-    max_block_lines: usize,
-    mode: TargetedReadMode,
+    config: TargetedReadConfig,
 ) -> Result<Vec<RetrievedChunk>> {
     let mut documents = HashMap::<String, Document>::new();
     let mut selected = Vec::new();
@@ -552,20 +561,20 @@ fn targeted_rg_chunks(
         }
 
         let window = LineRange {
-            start_line: hit.line.saturating_sub(context_lines).max(1),
+            start_line: hit.line.saturating_sub(config.context_lines).max(1),
             end_line: hit
                 .line
-                .saturating_add(context_lines)
+                .saturating_add(config.context_lines)
                 .min(document.line_count),
         };
-        let range = match mode {
+        let range = match config.mode {
             TargetedReadMode::Window => window,
             TargetedReadMode::Symbol => resolver
                 .enclosing_block(
                     Path::new(&document.path),
                     &document.lines,
                     hit.line,
-                    max_block_lines,
+                    config.max_block_lines,
                 )
                 .unwrap_or(window),
         };
@@ -582,7 +591,7 @@ fn targeted_rg_chunks(
         let mut content = document.numbered_range(range);
         let mut estimated_tokens = delivered_tokens(&content, &hit.path);
         let (range, content_tokens) =
-            if estimated_tokens > budget_tokens && matches!(mode, TargetedReadMode::Symbol) {
+            if estimated_tokens > config.budget_tokens && matches!(config.mode, TargetedReadMode::Symbol) {
                 let fallback = document.trim_trivial(window);
                 content = document.numbered_range(fallback);
                 estimated_tokens = delivered_tokens(&content, &hit.path);
@@ -592,8 +601,8 @@ fn targeted_rg_chunks(
             };
         estimated_tokens = content_tokens;
 
-        if estimated_tokens > budget_tokens
-            || total_tokens.saturating_add(estimated_tokens) > budget_tokens
+        if estimated_tokens > config.budget_tokens
+            || total_tokens.saturating_add(estimated_tokens) > config.budget_tokens
         {
             continue;
         }
