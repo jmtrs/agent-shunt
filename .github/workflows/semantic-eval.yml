@@ -9,8 +9,12 @@ on:
       - "examples/semantic_eval.rs"
       - "src/application/retrieve.rs"
       - "src/application/retrieve/**"
+      - "src/domain/**"
       - "src/adapters/ripgrep.rs"
       - "src/adapters/local_embedding.rs"
+      - "src/adapters/embedding_index.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
   push:
     branches: ["release/v*"]
     paths:
@@ -18,8 +22,12 @@ on:
       - "examples/semantic_eval.rs"
       - "src/application/retrieve.rs"
       - "src/application/retrieve/**"
+      - "src/domain/**"
       - "src/adapters/ripgrep.rs"
       - "src/adapters/local_embedding.rs"
+      - "src/adapters/embedding_index.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
