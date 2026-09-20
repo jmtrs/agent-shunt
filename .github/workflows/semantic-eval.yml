@@ -50,7 +50,6 @@ jobs:
           - { name: flask, repo: "https://github.com/pallets/flask.git", commit: "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35", corpus: flask }
           - { name: hono, repo: "https://github.com/honojs/hono.git", commit: "098e11912ab244c5c33931de007f04dc8e3c2929", corpus: hono }
           - { name: cobra, repo: "https://github.com/spf13/cobra.git", commit: "adbc8813901bba65827259daa8e22ff94ec1f30e", corpus: cobra }
-          - { name: gson, repo: "https://github.com/google/gson.git", commit: "854c8255b625cf1e13c701a83ea9ccb4caaa576a", corpus: gson }
 
     steps:
       - uses: actions/checkout@v5
