@@ -90,6 +90,10 @@ const UNTRACKED_FILE_BOOST: usize = 2;
 /// that one hit never swallows the budget.
 pub const MAX_BLOCK_LINES: usize = 48;
 
+/// A long definition may fit the overall result budget yet crowd out every
+/// other piece of evidence. Keep each delivered region focused around a hit.
+const MAX_CHUNK_TOKENS: usize = 600;
+
 /// Most chunks any single file may contribute to the result. Generous enough
 /// that a genuinely file-localized question still gets deep coverage, tight
 /// enough that one term-heavy file cannot flood the budget with a scatter of
@@ -299,16 +303,12 @@ pub fn execute_with_resolver(
             }
         }
     }
-    let mut grouped: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
-    // Which query terms each file matched, OR-ed across its hits, kept for the
-    // `--why` provenance annotation (bit i of the mask is `terms[i]`).
-    let mut coverage: BTreeMap<String, u16> = BTreeMap::new();
+    let mut grouped: BTreeMap<String, Vec<(usize, usize, u16)>> = BTreeMap::new();
     for hit in hits {
-        *coverage.entry(hit.path.clone()).or_default() |= hit.matched_terms;
         grouped
             .entry(hit.path)
             .or_default()
-            .push((hit.line, hit.score));
+            .push((hit.line, hit.score, hit.matched_terms));
     }
 
     let mut ranked_files = grouped
@@ -316,7 +316,7 @@ pub fn execute_with_resolver(
         .map(|(path, hits)| {
             (
                 path.clone(),
-                hits.iter().map(|(_, score)| *score).max().unwrap_or(0),
+                hits.iter().map(|(_, score, _)| *score).max().unwrap_or(0),
             )
         })
         .collect::<Vec<_>>();
@@ -382,13 +382,14 @@ pub fn execute_with_resolver(
         let Some(document) = by_path.get(&path) else {
             continue;
         };
+        let chunk_budget = input.budget_tokens.min(MAX_CHUNK_TOKENS);
         let mut ranges = grouped[&path]
             .iter()
-            .map(|(line, score)| {
+            .map(|(line, score, _)| {
                 // Snap each hit to its enclosing block so several hits in one
                 // function collapse to a single chunk instead of a scatter of
-                // overlapping fixed windows; fall back to the fixed window for
-                // top-level statements or blocks too large to be worth it.
+                // overlapping fixed windows. A block that consumes too much
+                // context falls back to a focused window around the hit.
                 let range = resolver
                     .enclosing_block(
                         std::path::Path::new(&document.path),
@@ -396,11 +397,17 @@ pub fn execute_with_resolver(
                         *line,
                         input.max_block_lines,
                     )
-                    .unwrap_or(LineRange {
-                        start_line: line.saturating_sub(input.context_lines).max(1),
-                        end_line: (*line + input.context_lines).min(document.line_count),
-                    });
-                (document.trim_trivial(range), *score)
+                    .map(|range| document.trim_trivial(range));
+                let range = match range {
+                    Some(range)
+                        if delivered_tokens(&document.numbered_range(range), &path)
+                            <= chunk_budget =>
+                    {
+                        range
+                    }
+                    _ => focused_range(document, &path, *line, input.context_lines, chunk_budget),
+                };
+                (range, *score)
             })
             .collect::<Vec<_>>();
         ranges.sort_by_key(|(range, _)| range.start_line);
@@ -413,12 +420,9 @@ pub fn execute_with_resolver(
                     start_line: previous.start_line,
                     end_line: previous.end_line.max(range.end_line),
                 };
-                // Keep merged chunks within the evidence budget: chained hits
-                // in one file must not grow into a chunk that can never fit,
-                // starving the top-ranked file of the whole budget.
-                if delivered_tokens(&document.numbered_range(extended), &path)
-                    <= input.budget_tokens
-                {
+                // Keep adjacent hits within the per-chunk budget too: merging
+                // focused windows back into a huge definition defeats the split.
+                if delivered_tokens(&document.numbered_range(extended), &path) <= chunk_budget {
                     *previous = extended;
                     *previous_score = (*previous_score).max(score);
                     continue;
@@ -426,29 +430,29 @@ pub fn execute_with_resolver(
             }
             merged.push((range, score));
         }
-        let (source, matched_terms) = if input.why {
-            (
-                Some("lexical".to_owned()),
-                Some(decode_terms(
-                    coverage.get(&path).copied().unwrap_or(0),
-                    &terms,
-                )),
-            )
-        } else {
-            (None, None)
-        };
         for (range, score) in merged {
+            // `--why` reports terms present in this range, not anywhere else
+            // in the same file. Local term coverage also modestly rewards a
+            // chunk that brings several query concepts together.
+            let local_mask = grouped[&path]
+                .iter()
+                .filter(|(line, _, _)| range.start_line <= *line && *line <= range.end_line)
+                .fold(0u16, |mask, (_, _, matched)| mask | matched);
             let content = document.numbered_range(range);
             let estimated_tokens = delivered_tokens(&content, &path);
             candidates.push(RetrievedChunk {
                 path: path.clone(),
                 start_line: range.start_line,
                 end_line: range.end_line,
-                score: score * 10 + file_score,
+                score: score
+                    .saturating_mul(
+                        10 + (local_mask.count_ones() as usize).saturating_sub(1).min(3),
+                    )
+                    .saturating_add(file_score / 4),
                 estimated_tokens,
                 content,
-                source: source.clone(),
-                matched_terms: matched_terms.clone(),
+                source: input.why.then(|| "lexical".to_owned()),
+                matched_terms: input.why.then(|| decode_terms(local_mask, &terms)),
             });
         }
     }
@@ -522,6 +526,26 @@ pub fn execute_with_resolver(
         },
         selected_documents,
     ))
+}
+
+fn focused_range(
+    document: &Document,
+    path: &str,
+    hit_line: usize,
+    context_lines: usize,
+    max_tokens: usize,
+) -> LineRange {
+    let mut radius = context_lines;
+    loop {
+        let range = document.trim_trivial(LineRange {
+            start_line: hit_line.saturating_sub(radius).max(1),
+            end_line: hit_line.saturating_add(radius).min(document.line_count),
+        });
+        if radius == 0 || delivered_tokens(&document.numbered_range(range), path) <= max_tokens {
+            return range;
+        }
+        radius -= 1;
+    }
 }
 
 fn select_candidates(

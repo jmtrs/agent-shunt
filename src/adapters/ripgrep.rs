@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     io::{BufRead, BufReader},
     path::Path,
     process::{Command, Stdio},
@@ -94,11 +94,17 @@ const IDF_SCALE: f64 = 4.0;
 /// file flooding a localized question.
 const COVERAGE_TAIL_DIVISOR: usize = 3;
 
-/// A file whose *name* matches a query term is a strong locator ("metrics" ->
-/// metrics.rs), so a filename match is worth several content occurrences of the
-/// same term, weighted by the term's rarity (IDF). Generic tokens weigh little,
-/// so `create-table.png` cannot dominate the way it used to.
-const FILENAME_BOOST: usize = 8;
+/// A basename helps locate a subject file, but it must not outweigh a line
+/// where multiple query terms meet (for example, the actual final-submit call).
+const FILENAME_BOOST: usize = 2;
+
+/// A file whose stem *equals* a query term (`ripgrep.rs` for "ripgrep") is a
+/// far stronger locator than a substring name hit, so it replaces
+/// [`FILENAME_BOOST`] with this multiplier. Pinned by the ripgrep regression
+/// query in the evaluation suite: high enough that an exact-name file beats
+/// unrelated single-term content matches, while the real subject still wins
+/// on lines where several distinct terms meet.
+const EXACT_NAME_BOOST: usize = 8;
 
 /// A matching parent directory is useful module/package evidence, but it is a
 /// much weaker locator than the basename. It only augments files that already
@@ -169,9 +175,10 @@ const STOP_WORDS: &[&str] = &[
     // Interrogatives and auxiliaries carry no locating signal but survive the
     // length filter, so a natural-language question ("how does X work") would
     // otherwise spend term slots and rank noise on them.
-    "how", "does", "are", "was", "were", "has", "have", "had", "why", "who", "will", "can",
-    "should", "would", "into", "about", "los", "las", "una", "uno", "del", "con", "donde", "dónde",
-    "como", "cómo", "que", "qué", "por", "para", "está", "esta", "son", "hay",
+    "how", "does", "are", "was", "were", "has", "have", "had", "why", "who", "whom", "whose",
+    "when", "will", "can", "should", "would", "into", "about", "before", "after", "los", "las",
+    "una", "uno", "del", "con", "donde", "dónde", "como", "cómo", "que", "qué", "por", "para",
+    "está", "esta", "son", "hay",
 ];
 
 impl CodeSearch for RipgrepSearch {
@@ -204,12 +211,17 @@ impl CodeSearch for RipgrepSearch {
         let mut hits: Vec<SearchHit> = Vec::new();
         // Cap on raw hits scored before ripgrep is killed. ripgrep emits in
         // filesystem-traversal order, not by relevance, so a cap hit early
-        // silently drops everything traversed later — a recall bias on large
-        // trees. A high ceiling (still bounded, still guarded by SEARCH_TIMEOUT
-        // and `--max-count 20` per file) keeps that bias off the common case;
-        // an explicit `--glob`/`--diff` scope narrows traversal so it cannot
-        // truncate the requested files at all.
+        // silently drops everything traversed later. Do not impose a per-file
+        // `rg --max-count`: it hides late calls in long source files. Instead a
+        // generous per-path ceiling keeps one match-dense file (a bundle or
+        // log) from consuming the whole raw budget before later files are
+        // traversed. The raw ceiling and timeout bound the scan; after scoring,
+        // overfull files are sampled across their full span before the result
+        // is truncated.
         let raw_hit_limit = max_hits.saturating_mul(50).clamp(max_hits, 50_000);
+        const MAX_HITS_PER_FILE: usize = 2_000;
+        let mut per_file_hits: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let pattern = forms
             .iter()
             .flatten()
@@ -222,8 +234,6 @@ impl CodeSearch for RipgrepSearch {
             "--line-number",
             "--ignore-case",
             "--no-messages",
-            "--max-count",
-            "20",
             "--max-filesize",
             "5M",
         ]);
@@ -279,8 +289,14 @@ impl CodeSearch for RipgrepSearch {
             if matched_terms == 0 {
                 continue;
             }
+            let owned_path = path.strip_prefix("./").unwrap_or(path).to_owned();
+            let counted = per_file_hits.entry(owned_path.clone()).or_insert(0);
+            if *counted >= MAX_HITS_PER_FILE {
+                continue;
+            }
+            *counted += 1;
             hits.push(SearchHit {
-                path: path.strip_prefix("./").unwrap_or(path).to_owned(),
+                path: owned_path,
                 line: line_number as usize,
                 score: 0,
                 matched_terms,
@@ -319,17 +335,6 @@ impl CodeSearch for RipgrepSearch {
                     .max(1.0) as usize
             })
             .collect::<Vec<_>>();
-        // A filename match locates the subject file, so fold its IDF-weighted
-        // boost into every content hit of that path (lifting the whole file) and
-        // keep it as the score for files matched only by name.
-        let mut filename_boost = std::collections::HashMap::<String, usize>::new();
-        for hit in &filename_raw {
-            let boost = filename_boost_of(hit.matched_terms, &term_weight);
-            filename_boost
-                .entry(hit.path.clone())
-                .and_modify(|value| *value = (*value).max(boost))
-                .or_insert(boost);
-        }
         // Parent directories carry weaker package/module evidence. Only files
         // already present in `coverage` can receive it; a path component match
         // alone never creates a retrieval hit.
@@ -345,6 +350,23 @@ impl CodeSearch for RipgrepSearch {
                 })
             })
             .collect::<std::collections::HashMap<_, _>>();
+        let exact_name_boost = coverage
+            .keys()
+            .filter_map(|path| {
+                let name = Path::new(path)
+                    .file_stem()
+                    .and_then(|name| name.to_str())?
+                    .to_ascii_lowercase();
+                let weight = forms
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, spellings)| spellings.iter().any(|form| form == &name))
+                    .map(|(index, _)| term_weight[index])
+                    .max()
+                    .unwrap_or(0);
+                (weight > 0).then(|| (path.clone(), weight * EXACT_NAME_BOOST))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         for hit in &mut hits {
             let line_weight = weight_of(hit.matched_terms, &term_weight);
             let file_weight = coverage
@@ -352,20 +374,22 @@ impl CodeSearch for RipgrepSearch {
                 .copied()
                 .map(|mask| coverage_weight(mask, &term_weight))
                 .unwrap_or_default();
-            let name_boost = filename_boost.get(hit.path.as_str()).copied().unwrap_or(0);
             let path_boost = path_component_boost
                 .get(hit.path.as_str())
                 .copied()
                 .unwrap_or(0);
-            // Reward the matching line, a smaller bonus for how much of the whole
-            // query the file covers, a strong basename locator, and a weak
-            // parent-directory package/module signal.
-            hit.score = line_weight * 2 + file_weight + name_boost + path_boost;
+            let name_boost = exact_name_boost
+                .get(hit.path.as_str())
+                .copied()
+                .unwrap_or(0);
+            // The evidence on this line leads. Whole-file coverage and
+            // directory signals are weak context. An exact basename match
+            // locates a module named by the question; partial basename matches
+            // cannot promote unrelated lines elsewhere in a file.
+            hit.score = line_weight * 4 + file_weight / 2 + path_boost / 2 + name_boost;
         }
-        // Keep a filename hit only for a file with no content match. Where the
-        // file also matches in content, its boost is already folded into those
-        // hits; emitting the line-1 filename hit too would surface a useless
-        // top-of-file chunk (imports/boilerplate) that beats the real evidence.
+        // Keep a filename hit only for a file with no content match. Emitting
+        // it alongside real content would surface top-of-file boilerplate.
         filename_raw.retain(|hit| !coverage.contains_key(hit.path.as_str()));
         for hit in &mut filename_raw {
             hit.score = filename_boost_of(hit.matched_terms, &term_weight);
@@ -383,6 +407,7 @@ impl CodeSearch for RipgrepSearch {
                 hit.score = (hit.score * METADATA_SCORE_NUM / METADATA_SCORE_DEN).max(1);
             }
         }
+        hits = spread_overfull_files(hits, max_hits);
         hits.sort_by(|left, right| {
             right
                 .score
@@ -401,6 +426,12 @@ impl CodeSearch for RipgrepSearch {
             }
         }
         diverse.extend(deferred);
+        // Path diversity first, then extra lines per path. When more paths
+        // compete than max_hits, only each path's best line survives and the
+        // spread-picked late lines of an overfull file lose their deferred
+        // slots — a deliberate trade of depth-in-one-file for covering
+        // distinct files. Spread sampling still governs whenever fewer paths
+        // compete and deferred slots exist.
         diverse.truncate(max_hits);
         Ok(diverse)
     }
@@ -411,6 +442,66 @@ impl CodeSearch for RipgrepSearch {
             .output()
             .is_ok_and(|output| output.status.success())
     }
+}
+
+/// When a single file has more matches than the caller can receive, retain
+/// both its strongest lines and a deterministic sample across the whole file.
+/// This prevents an early run of generic matches from hiding a later boundary.
+fn spread_overfull_files(hits: Vec<SearchHit>, max_hits: usize) -> Vec<SearchHit> {
+    if max_hits == 0 {
+        return Vec::new();
+    }
+    let mut by_path: BTreeMap<String, Vec<SearchHit>> = BTreeMap::new();
+    for hit in hits {
+        by_path.entry(hit.path.clone()).or_default().push(hit);
+    }
+    let mut kept = Vec::new();
+    for mut file_hits in by_path.into_values() {
+        if file_hits.len() <= max_hits {
+            kept.extend(file_hits);
+            continue;
+        }
+        file_hits.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        let strong_count = max_hits.div_ceil(2);
+        let mut chosen = file_hits[..strong_count].to_vec();
+        let mut chosen_lines = chosen.iter().map(|hit| hit.line).collect::<HashSet<_>>();
+        file_hits.sort_by_key(|hit| hit.line);
+        let spread_count = max_hits - strong_count;
+        for slot in 0..spread_count {
+            let index = if spread_count == 1 {
+                file_hits.len() - 1
+            } else {
+                slot * (file_hits.len() - 1) / (spread_count - 1)
+            };
+            let hit = &file_hits[index];
+            if chosen_lines.insert(hit.line) {
+                chosen.push(hit.clone());
+            }
+        }
+        if chosen.len() < max_hits {
+            file_hits.sort_by(|left, right| {
+                right
+                    .score
+                    .cmp(&left.score)
+                    .then_with(|| left.line.cmp(&right.line))
+            });
+            for hit in file_hits {
+                if chosen_lines.insert(hit.line) {
+                    chosen.push(hit);
+                    if chosen.len() == max_hits {
+                        break;
+                    }
+                }
+            }
+        }
+        kept.extend(chosen);
+    }
+    kept
 }
 
 fn filename_hits(
@@ -547,7 +638,9 @@ fn query_terms(question: &str) -> Vec<String> {
                         || term.chars().any(|character| character.is_ascii_digit())))
         })
         .filter(|term| !stop.contains(term.to_lowercase().as_str()))
-        .filter(|term| seen.insert(term.to_lowercase()))
+        // `submit` and `submitted` are the same locating concept. Keeping
+        // both would credit one occurrence twice and bury rarer qualifiers.
+        .filter(|term| seen.insert(stem(term)))
         .take(12)
         .map(ToOwned::to_owned)
         .collect()
@@ -633,30 +726,46 @@ fn split_words(term: &str) -> Vec<String> {
     words
 }
 
-/// Base weight before inverse-document-frequency scaling. Identifier-shaped
-/// terms (camelCase, snake_case, namespaced, or long) are far more likely to be
-/// what the caller actually meant than short lowercase words.
+/// Base weight before inverse-document-frequency scaling. Explicit identifier
+/// syntax is the strongest signal; a long natural-language word is useful but
+/// must not drown a rarer short qualifier such as "final".
 fn intrinsic_weights(terms: &[String]) -> Vec<usize> {
     terms
         .iter()
-        .map(|term| if is_identifier_like(term) { 3 } else { 1 })
+        .enumerate()
+        .map(|(index, term)| {
+            let base = if is_identifier_like(term) {
+                3
+            } else if term.len() >= 8 {
+                2
+            } else {
+                1
+            };
+            // After stop-word removal, the opening term often names the
+            // specific subject or qualifier of the question. Keep it from
+            // being overwhelmed by several later, broader nouns.
+            base + usize::from(index == 0)
+        })
         .collect()
 }
 
 fn is_identifier_like(term: &str) -> bool {
-    term.len() >= 8
-        || term.contains('_')
+    term.contains('_')
         || term.contains("::")
         || term.contains('.')
-        || term.chars().any(|c| c.is_ascii_uppercase())
+        || term.chars().skip(1).any(|c| c.is_ascii_uppercase())
 }
 
-/// Naive suffix stemmer: drops a trailing plural/verb `s`/`es` so a query in one
-/// grammatical number still matches code written in the other. Deliberately
-/// conservative — it only trims, never rewrites, to avoid surprising matches.
+/// Conservative suffix stemmer for common plurals and past tense. The matcher
+/// accepts a longer token after the stem, so a shorter form still finds the
+/// original spelling without duplicating its score.
 fn stem(term: &str) -> String {
     let lower = term.to_lowercase();
-    if lower.len() > 4 && lower.ends_with("es") {
+    if lower.len() > 6 && lower.ends_with("tted") {
+        lower[..lower.len() - 3].to_owned()
+    } else if (lower.len() > 5 && lower.ends_with("ed"))
+        || (lower.len() > 4 && lower.ends_with("es"))
+    {
         lower[..lower.len() - 2].to_owned()
     } else if lower.len() > 3
         && lower.ends_with('s')
@@ -801,6 +910,17 @@ mod tests {
         assert_eq!(stem("status"), "status");
         assert_eq!(stem("focus"), "focus");
         assert_eq!(stem("basis"), "basis");
+        assert_eq!(stem("submitted"), "submit");
+        assert_eq!(stem("checked"), "check");
+    }
+
+    #[test]
+    fn inflected_query_terms_are_not_double_counted() {
+        use super::query_terms;
+        assert_eq!(
+            query_terms("final submit authorization checked before submitted"),
+            ["final", "submit", "authorization", "checked"]
+        );
     }
 
     #[test]
@@ -876,6 +996,54 @@ mod tests {
             .search(root.path(), "bounded-search-marker", 7, &[])
             .unwrap();
         assert_eq!(hits.len(), 7);
+    }
+
+    #[test]
+    fn long_file_search_reaches_matches_after_the_first_twenty() {
+        let root = tempdir().unwrap();
+        let mut lines = (1..=1_620)
+            .map(|line| {
+                if line <= 30 {
+                    format!("// early submit mention {line}")
+                } else {
+                    format!("const filler{line} = true;")
+                }
+            })
+            .collect::<Vec<_>>();
+        lines[1_615] = "await saveAudit(audit, 'ready_to_submit');".to_owned();
+        fs::write(root.path().join("linkedin-apply.js"), lines.join("\n")).unwrap();
+
+        let hits = RipgrepSearch
+            .search(
+                root.path(),
+                "Where is final submit authorization checked before an application is submitted?",
+                200,
+                &["linkedin-apply.js".to_owned()],
+            )
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.line == 1_616),
+            "late final-submit boundary was hidden by earlier matches"
+        );
+    }
+
+    #[test]
+    fn overfull_file_keeps_late_matches_with_a_small_hit_limit() {
+        let root = tempdir().unwrap();
+        let mut lines = (1..=300)
+            .map(|line| format!("// submit mention {line}"))
+            .collect::<Vec<_>>();
+        lines.push("await saveAudit(audit, 'ready_to_submit');".to_owned());
+        fs::write(root.path().join("linkedin-apply.js"), lines.join("\n")).unwrap();
+
+        let hits = RipgrepSearch
+            .search(root.path(), "submit", 40, &["linkedin-apply.js".to_owned()])
+            .unwrap();
+        assert_eq!(hits.len(), 40);
+        assert!(
+            hits.iter().any(|hit| hit.line == 301),
+            "late boundary should survive the per-file sampling"
+        );
     }
 
     #[test]

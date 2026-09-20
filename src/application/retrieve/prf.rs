@@ -30,6 +30,24 @@ pub(super) fn prf_terms(
     if hits.is_empty() {
         return Ok(Vec::new());
     }
+    // Feedback is useful when the first pass has weak lexical evidence. If
+    // several original query concepts already meet on one line, mining common
+    // identifiers from whole files can swamp that precise boundary instead.
+    // `question` is the string actually searched (it may already carry
+    // `--expand` terms); the hit masks index that same term set, so both sides
+    // of this comparison stay in one index space.
+    let term_count = search.terms(question).len();
+    if hits.iter().any(|hit| {
+        // Filename-only synthetic hits sit on line 1: a basename that happens
+        // to carry several terms is not the "concepts meet on one line"
+        // evidence that makes expansion counterproductive.
+        hit.line > 1 && {
+            let local_count = hit.matched_terms.count_ones() as usize;
+            local_count >= 3 && local_count * 2 >= term_count
+        }
+    }) {
+        return Ok(Vec::new());
+    }
     let mut best: BTreeMap<String, usize> = BTreeMap::new();
     for hit in &hits {
         let entry = best.entry(hit.path.clone()).or_default();
